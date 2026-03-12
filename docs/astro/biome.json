@@ -1,0 +1,43 @@
+{
+    "root": true,
+    "extends": ["../../biome.json"],
+    "files": {
+        "includes": [
+            "**",
+            "!**/.astro/**",
+            "**/*.astro",
+            "!**/playwright-report/**",
+            "!**/src/utils/**"
+        ]
+    },
+    "formatter": {},
+    "linter": {
+        "rules": {
+            "style": {
+                "noParameterAssign": "error",
+                "useAsConstAssertion": "error",
+                "useDefaultParameterLast": "error",
+                "useEnumInitializers": "error",
+                "useSelfClosingElements": "error",
+                "useSingleVarDeclarator": "error",
+                "noUnusedTemplateLiteral": "error",
+                "useNumberNamespace": "error",
+                "noInferrableTypes": "error",
+                "noUselessElse": "error"
+            }
+        }
+    },
+    "overrides": [
+        {
+            "includes": ["**/*.astro"],
+            "linter": {
+                "rules": {
+                    "style": {
+                        "useConst": "off",
+                        "useImportType": "off"
+                    }
+                }
+            }
+        }
+    ]
+}
