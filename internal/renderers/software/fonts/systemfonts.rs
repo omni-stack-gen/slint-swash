@@ -14,11 +14,12 @@ pub fn match_font(
     scale_factor: super::ScaleFactor,
 ) -> Option<VectorFont> {
     if request.family.is_some() {
+        let weight = request.weight.unwrap_or(400);
         let requested_pixel_size: PhysicalLength =
             (request.pixel_size.unwrap_or(super::DEFAULT_FONT_SIZE).cast() * scale_factor).cast();
 
         if let Some(font) = request.query_fontique() {
-            Some(VectorFont::new(font.blob, font.index, requested_pixel_size))
+            Some(VectorFont::new(font.blob, font.index, requested_pixel_size, weight))
         } else {
             None
         }
@@ -28,11 +29,12 @@ pub fn match_font(
 }
 
 pub fn fallbackfont(font_request: &super::FontRequest, scale_factor: ScaleFactor) -> VectorFont {
+    let weight = font_request.weight.unwrap_or(400);
     let requested_pixel_size: PhysicalLength =
         (font_request.pixel_size.unwrap_or(super::DEFAULT_FONT_SIZE).cast() * scale_factor).cast();
 
     let font = font_request.query_fontique().unwrap();
-    VectorFont::new(font.blob, font.index, requested_pixel_size)
+    VectorFont::new(font.blob, font.index, requested_pixel_size, weight)
 }
 
 pub fn register_font_from_memory(data: &'static [u8]) -> Result<(), Box<dyn std::error::Error>> {

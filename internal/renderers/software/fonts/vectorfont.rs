@@ -13,14 +13,14 @@ use i_slint_core::lengths::PhysicalPx;
 use i_slint_core::textlayout::{Glyph, TextShaper};
 
 use super::RenderableVectorGlyph;
-use super::swash_engine::{SwashEngine, GlyphMetrics};
+use super::swash_engine::{GlyphMetrics, SwashEngine};
 
 // A length in font design space.
 struct FontUnit;
 type FontLength = euclid::Length<i32, FontUnit>;
 type FontScaleFactor = euclid::Scale<f32, FontUnit, PhysicalPx>;
 
-type GlyphCacheKey = (u64, u32, PhysicalLength, core::num::NonZeroU16);
+type GlyphCacheKey = (u64, u32, PhysicalLength, i32, core::num::NonZeroU16);
 
 struct RenderableGlyphWeightScale;
 
@@ -61,6 +61,7 @@ where
 }
 
 pub struct VectorFont {
+    weight: i32,
     font_index: u32,
     font_blob: fontique::Blob<u8>,
     ascender: PhysicalLength,
@@ -76,14 +77,16 @@ impl VectorFont {
         font_blob: fontique::Blob<u8>,
         font_index: u32,
         pixel_size: PhysicalLength,
+        weight: i32,
     ) -> Self {
-        Self::new_from_blob_and_index(font_blob, font_index, pixel_size)
+        Self::new_from_blob_and_index(font_blob, font_index, pixel_size, weight)
     }
 
     pub fn new_from_blob_and_index(
         font_blob: fontique::Blob<u8>,
         font_index: u32,
         pixel_size: PhysicalLength,
+        weight: i32,
     ) -> Self {
         let face = skrifa::FontRef::from_index(font_blob.data(), font_index).unwrap();
 
@@ -106,6 +109,7 @@ impl VectorFont {
             pixel_size,
             x_height: (x_height.cast() * scale).cast(),
             cap_height: (cap_height.cast() * scale).cast(),
+            weight,
         }
     }
 
@@ -117,7 +121,8 @@ impl VectorFont {
         GLYPH_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
 
-            let cache_key = (self.font_blob.id(), self.font_index, self.pixel_size, glyph_id);
+            let cache_key =
+                (self.font_blob.id(), self.font_index, self.pixel_size, self.weight, glyph_id);
 
             if let Some(entry) = cache.get(&cache_key) {
                 Some(entry.clone())
@@ -129,6 +134,7 @@ impl VectorFont {
                         self.font_blob.id(),
                         glyph_id.get(),
                         self.pixel_size.get() as f32,
+                        self.weight,
                     )
                 })?;
 
@@ -147,7 +153,7 @@ impl VectorFont {
                     height: PhysicalLength::new(mask.height.try_into().unwrap()),
                     alpha_map,
                     pixel_stride: mask.width.try_into().unwrap(),
-                    subpixel: true, // Swash now uses BGRA subpixel rendering
+                    subpixel: false, // Swash now uses BGRA subpixel rendering
                 };
 
                 cache.put_with_weight(cache_key, glyph.clone()).ok();
@@ -159,11 +165,7 @@ impl VectorFont {
     /// 获取字形度量（使用 Swash）
     fn get_glyph_metrics(&self, glyph_id: u16) -> Option<GlyphMetrics> {
         with_swash_engine(|engine| {
-            engine.glyph_metrics(
-                self.font_blob.data(),
-                glyph_id,
-                self.pixel_size.get() as f32,
-            )
+            engine.glyph_metrics(self.font_blob.data(), glyph_id, self.pixel_size.get() as f32)
         })
     }
 }
@@ -181,12 +183,9 @@ impl TextShaper for VectorFont {
         let char_map = face.charmap();
 
         glyphs.extend(text.char_indices().map(|(byte_offset, char)| {
-            let glyph_id = char_map.map(char).map(|id: skrifa::GlyphId| id.to_u32() as u16).unwrap_or(0);
-            let glyph_id = if glyph_id != 0 {
-                NonZeroU16::new(glyph_id)
-            } else {
-                None
-            };
+            let glyph_id =
+                char_map.map(char).map(|id: skrifa::GlyphId| id.to_u32() as u16).unwrap_or(0);
+            let glyph_id = if glyph_id != 0 { NonZeroU16::new(glyph_id) } else { None };
 
             let x_advance = glyph_id.map_or_else(
                 || self.pixel_size.get(),
@@ -217,7 +216,8 @@ impl TextShaper for VectorFont {
         }
         let glyph_id = NonZeroU16::new(glyph_id)?;
 
-        let advance = self.get_glyph_metrics(glyph_id.get())
+        let advance = self
+            .get_glyph_metrics(glyph_id.get())
             .map(|m| m.advance as i16)
             .unwrap_or_else(|| self.pixel_size.get());
 

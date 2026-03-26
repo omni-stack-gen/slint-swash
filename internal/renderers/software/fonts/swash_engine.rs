@@ -6,14 +6,14 @@
 //! 使用 Swash 库实现按需光栅化，配合 LRU 缓存减少内存占用
 
 use alloc::rc::Rc;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::num::NonZeroUsize;
 
-use swash::{FontRef, GlyphId};
-use swash::scale::{ScaleContext, Render, Source, StrikeWith};
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Format, Vector};
+use swash::{FontRef, GlyphId};
 
 use crate::PhysicalLength;
 use crate::fixed::Fixed;
@@ -29,7 +29,7 @@ pub struct AlphaMask {
 }
 
 /// 缓存键：(字体ID, 字形ID, 像素大小)
-type CacheKey = (u64, u16, u32);
+type CacheKey = (u64, u16, u32, u32);
 
 /// Swash 光栅化引擎
 pub struct SwashEngine {
@@ -48,7 +48,7 @@ impl SwashEngine {
         Self {
             context: ScaleContext::new(),
             cache: lru::LruCache::new(
-                NonZeroUsize::new(cache_capacity).unwrap_or(NonZeroUsize::new(512).unwrap())
+                NonZeroUsize::new(cache_capacity).unwrap_or(NonZeroUsize::new(512).unwrap()),
             ),
         }
     }
@@ -70,9 +70,10 @@ impl SwashEngine {
         font_id: u64,
         glyph_id: u16,
         size_px: f32,
+        weight: i32,
     ) -> Option<AlphaMask> {
         let size_u32 = size_px.round() as u32;
-        let key: CacheKey = (font_id, glyph_id, size_u32);
+        let key: CacheKey = (font_id, glyph_id, size_u32, weight as u32);
 
         // 检查缓存
         if let Some(mask) = self.cache.get(&key) {
@@ -80,7 +81,7 @@ impl SwashEngine {
         }
 
         // 缓存未命中，执行光栅化
-        let mask = self.rasterize_glyph(font_data, glyph_id, size_px)?;
+        let mask = self.rasterize_glyph(font_data, glyph_id, size_px, weight)?;
 
         // 存入缓存
         self.cache.put(key, mask.clone());
@@ -94,24 +95,18 @@ impl SwashEngine {
         font_data: &[u8],
         glyph_id: u16,
         size_px: f32,
+        weight: i32,
     ) -> Option<AlphaMask> {
         // Swash 零拷贝解析字体
         let font = FontRef::from_index(font_data, 0)?;
 
         // 构建缩放器（禁用 hinting 以获得更平滑的字体边缘）
-        let mut scaler = self.context
-            .builder(font)
-            .size(size_px)
-            .hint(false)
-            .build();
+        let mut scaler = self.context.builder(font).size(size_px).hint(false).build();
 
-        // 配置渲染器，使用 BGRA 子像素渲染改善小字体清晰度
+        // 配置渲染器，使用标准 Alpha 渲染（避免 BGRA 子像素格式不匹配问题）
         // 优先使用 Outline，然后是 ColorOutline
-        let mut render = Render::new(&[
-            Source::Outline,
-            Source::ColorOutline(0),
-        ]);
-        render.format(Format::subpixel_bgra());
+        let mut render = Render::new(&[Source::Outline, Source::ColorOutline(0)]);
+        render.format(Format::Alpha);
 
         // 执行渲染
         let image = render.render(&mut scaler, glyph_id)?;
@@ -133,17 +128,52 @@ impl SwashEngine {
             }
         }
 
-        // 小字体 (< 20px) 额外膨胀增粗，改善可读性
-        if size_px < 20.0 && !data.is_empty() {
-            data = dilate_alpha(&data, width, height, 1);
-        }
+        // 根据字重应用合成粗体（膨胀）
+        // weight 400 = 正常，0次
+        // weight 500-600 = 半粗，1次
+        // weight 700-800 = 粗体，1-2次（保守设置，避免过大）
+        let bold_iterations = if weight <= 400 {
+            0
+        } else if weight <= 600 {
+            1
+        } else if weight <= 800 {
+            // 大字只需要1-2次，小字不膨胀（避免小字糊成一团）
+            if size_px >= 48.0 {
+                2 // 特大字（如140px的"26"）
+            } else if size_px >= 24.0 {
+                1 // 中大字（如24px）
+            } else {
+                0 // 小字不需要膨胀，保持清晰
+            }
+        } else {
+            if size_px >= 48.0 { 2 } else { 1 }
+        };
+
+        // 计算膨胀后的尺寸和坐标调整
+        let (data, width, height, left_adjust, top_adjust) = if bold_iterations > 0
+            && !data.is_empty()
+        {
+            let padding = bold_iterations as i32;
+            // 添加 padding 防止裁剪
+            let data_with_padding = add_padding(&data, width, height, padding);
+            let new_width = width + 2 * padding as u32;
+            let new_height = height + 2 * padding as u32;
+
+            // 执行膨胀
+            let dilated = dilate_alpha(&data_with_padding, new_width, new_height, bold_iterations);
+
+            // 计算坐标调整（膨胀后向四周扩展，left/top 需要减去 padding）
+            (dilated, new_width, new_height, -padding, -padding)
+        } else {
+            (data, width, height, 0, 0)
+        };
 
         let mask = AlphaMask {
             data,
             width,
             height,
-            left: image.placement.left,
-            top: image.placement.top,
+            left: image.placement.left + left_adjust,
+            top: image.placement.top + top_adjust,
         };
 
         Some(mask)
@@ -166,9 +196,7 @@ impl SwashEngine {
         let glyph_metrics = font.glyph_metrics(&[]);
         let advance = glyph_metrics.advance_width(glyph_id) * scale;
 
-        Some(GlyphMetrics {
-            advance: advance as i16,
-        })
+        Some(GlyphMetrics { advance: advance as i16 })
     }
 
     /// 清除缓存
@@ -191,6 +219,24 @@ pub struct GlyphMetrics {
 /// Alpha 蒙版膨胀（形态学膨胀）- 用于小字体增粗
 ///
 /// 使用全 3x3 核膨胀（8 邻居），笔画增粗更圆润均匀
+/// 为 alpha 图像添加 padding（防止膨胀时边缘被裁剪）
+fn add_padding(data: &[u8], width: u32, height: u32, padding: i32) -> Vec<u8> {
+    if padding <= 0 {
+        return data.to_vec();
+    }
+    let p = padding as usize;
+    let w = width as usize;
+    let h = height as usize;
+    let new_w = w + 2 * p;
+    let new_h = h + 2 * p;
+    let mut result = vec![0u8; new_w * new_h];
+    for y in 0..h {
+        for x in 0..w {
+            result[(y + p) * new_w + (x + p)] = data[y * w + x];
+        }
+    }
+    result
+}
 fn dilate_alpha(data: &[u8], width: u32, height: u32, iterations: u32) -> Vec<u8> {
     if width == 0 || height == 0 {
         return data.to_vec();

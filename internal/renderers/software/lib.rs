@@ -63,6 +63,18 @@ type PhysicalBorderRadius = BorderRadius<i16, PhysicalPx>;
 
 pub use i_slint_core::partial_renderer::RepaintBufferType;
 
+i_slint_core::thread_local! {
+    static CURRENT_FONT_WEIGHT: core::cell::Cell<i32> = core::cell::Cell::new(400);
+}
+
+fn set_current_font_weight(weight: i32) {
+    CURRENT_FONT_WEIGHT.with(|w| w.set(weight));
+}
+
+fn get_current_font_weight() -> i32 {
+    CURRENT_FONT_WEIGHT.with(|w| w.get())
+}
+
 /// This enum describes the rotation that should be applied to the contents rendered by the software renderer.
 ///
 /// Argument to be passed in [`SoftwareRenderer::set_rendering_rotation`].
@@ -768,6 +780,7 @@ impl RendererSealed for SoftwareRenderer {
         };
         let font_request = text_item.font_request(item_rc);
         let font = fonts::match_font(&font_request, scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
 
         #[cfg(feature = "systemfonts")]
         if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
@@ -814,6 +827,7 @@ impl RendererSealed for SoftwareRenderer {
         };
         let font_request = text_item.font_request(item_rc);
         let font = fonts::match_font(&font_request, scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
@@ -848,6 +862,7 @@ impl RendererSealed for SoftwareRenderer {
             return i_slint_core::items::FontMetrics::default();
         };
         let font = fonts::match_font(&font_request, scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
@@ -893,6 +908,7 @@ impl RendererSealed for SoftwareRenderer {
         };
         let font_request = text_input.font_request(item_rc);
         let font = fonts::match_font(&font_request, scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
@@ -970,6 +986,7 @@ impl RendererSealed for SoftwareRenderer {
         };
         let font_request = text_input.font_request(item_rc);
         let font = fonts::match_font(&font_request, scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
@@ -2575,6 +2592,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         let font_request = text.font_request(self_rc);
 
         let font = fonts::match_font(&font_request, self.scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
 
         #[cfg(feature = "systemfonts")]
         if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
@@ -2660,6 +2678,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
     ) {
         let font_request = text_input.font_request(self_rc);
         let font = fonts::match_font(&font_request, self.scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
@@ -3031,6 +3050,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
     fn draw_string(&mut self, string: &str, color: Color) {
         let font_request = Default::default();
         let font = fonts::match_font(&font_request, self.scale_factor);
+        set_current_font_weight(font_request.weight.unwrap_or(400));
         let clip = self.current_state.clip.cast() * self.scale_factor;
 
         match (font, parley_disabled()) {
@@ -3152,10 +3172,12 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
         y_offset: sharedparley::PhysicalLength,
         glyphs_it: &mut dyn Iterator<Item = sharedparley::parley::layout::Glyph>,
     ) {
+        let weight = get_current_font_weight();
         let font = fonts::vectorfont::VectorFont::new(
             font.data.clone(),
             font.index,
             font_size.cast(),
+            weight,
         );
 
         let global_offset =
