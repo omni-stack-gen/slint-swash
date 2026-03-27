@@ -1446,6 +1446,15 @@ fn process_rectangle_impl(
     let geom = args.geometry();
     let Some(clipped) = geom.intersection(&clip.cast()) else { return };
 
+    // Compute radius before gradient processing so we can pass it to gradient commands
+    let radius = PhysicalBorderRadius {
+        top_left: args.top_left_radius as _,
+        top_right: args.top_right_radius as _,
+        bottom_right: args.bottom_right_radius as _,
+        bottom_left: args.bottom_left_radius as _,
+        _unit: Default::default(),
+    };
+
     let color = if let Brush::LinearGradient(g) = &args.background {
         let angle = g.angle() + args.rotation.angle();
         let tan = angle.to_radians().tan().abs();
@@ -1521,6 +1530,7 @@ fn process_rectangle_impl(
                 ),
                 left_clip: Length::new((clipped.min_x() - geom.min_x()) as i16 - adjust_left),
                 right_clip: Length::new((geom.max_x() - clipped.max_x()) as i16 - adjust_right),
+                radius,
             };
 
             let act_rect = clipped.round().cast();
@@ -1555,6 +1565,7 @@ fn process_rectangle_impl(
                 .collect(),
             center_x,
             center_y,
+            radius,
         };
 
         processor.process_radial_gradient(clipped.cast(), radial_grad);
@@ -1569,6 +1580,7 @@ fn process_rectangle_impl(
                     stop
                 })
                 .collect(),
+            radius,
         };
 
         processor.process_conic_gradient(clipped.cast(), conic_grad);
@@ -1603,15 +1615,11 @@ fn process_rectangle_impl(
         }
     }
 
-    let radius = PhysicalBorderRadius {
-        top_left: args.top_left_radius as _,
-        top_right: args.top_right_radius as _,
-        bottom_right: args.bottom_right_radius as _,
-        bottom_left: args.bottom_left_radius as _,
-        _unit: Default::default(),
-    };
+    // Skip process_rounded_rectangle if we had a gradient, since the gradient
+    // command now includes radius and handles rounded clipping itself
+    let had_gradient = color == PremultipliedRgbaColor::default();
 
-    if !radius.is_zero() {
+    if !radius.is_zero() && !had_gradient {
         // Add a small value to make sure that the clip is always positive despite floating point shenanigans
         const E: f32 = 0.00001;
 
@@ -1639,17 +1647,36 @@ fn process_rectangle_impl(
     }
 
     if border_color.alpha > 0 {
-        let mut add_border = |r: PhysicalRect| {
-            if let Some(r) = r.intersection(clip) {
-                processor.process_simple_rectangle(r, border_color);
-            }
-        };
-        let b = border.get();
-        let g = geom.round().cast();
-        add_border(euclid::rect(g.min_x(), g.min_y(), g.width(), b));
-        add_border(euclid::rect(g.min_x(), g.min_y() + g.height() - b, g.width(), b));
-        add_border(euclid::rect(g.min_x(), g.min_y() + b, b, g.height() - b - b));
-        add_border(euclid::rect(g.min_x() + g.width() - b, g.min_y() + b, b, g.height() - b - b));
+        if had_gradient && !radius.is_zero() {
+            // When we have a gradient background with rounded corners, draw the border
+            // as a rounded rectangle with transparent inner color
+            const E: f32 = 0.00001;
+            processor.process_rounded_rectangle(
+                clipped.round().cast(),
+                RoundedRectangle {
+                    radius,
+                    width: border,
+                    border_color,
+                    inner_color: PremultipliedRgbaColor::default(),
+                    top_clip: PhysicalLength::new((clipped.min_y() - geom.min_y() + E) as _),
+                    bottom_clip: PhysicalLength::new((geom.max_y() - clipped.max_y() + E) as _),
+                    left_clip: PhysicalLength::new((clipped.min_x() - geom.min_x() + E) as _),
+                    right_clip: PhysicalLength::new((geom.max_x() - clipped.max_x() + E) as _),
+                },
+            );
+        } else {
+            let mut add_border = |r: PhysicalRect| {
+                if let Some(r) = r.intersection(clip) {
+                    processor.process_simple_rectangle(r, border_color);
+                }
+            };
+            let b = border.get();
+            let g = geom.round().cast();
+            add_border(euclid::rect(g.min_x(), g.min_y(), g.width(), b));
+            add_border(euclid::rect(g.min_x(), g.min_y() + g.height() - b, g.width(), b));
+            add_border(euclid::rect(g.min_x(), g.min_y() + b, b, g.height() - b - b));
+            add_border(euclid::rect(g.min_x() + g.width() - b, g.min_y() + b, b, g.height() - b - b));
+        }
     }
 }
 

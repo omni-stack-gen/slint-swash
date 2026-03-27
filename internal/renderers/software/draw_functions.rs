@@ -562,6 +562,112 @@ fn interpolate_color(
     }
 }
 
+/// Calculate the coverage (0-255) for a pixel at (px, py) within a rounded rectangle
+fn get_rounded_coverage(
+    px: i16,
+    py: i16,
+    rect: &PhysicalRect,
+    radius: &super::PhysicalBorderRadius,
+) -> u32 {
+    use super::PhysicalLength;
+
+    let width = rect.width() as i32;
+    let height = rect.height() as i32;
+
+    // If radius is zero, full coverage
+    if radius.is_zero() {
+        return 255;
+    }
+
+    // Convert to absolute coordinates within the rectangle (as i32 for calculations)
+    let x = (px - rect.min_x()) as i32;
+    let y = (py - rect.min_y()) as i32;
+
+    let (r, corner_x, corner_y) = if let Some(r) = radius.as_uniform() {
+        (r as i32, true, true)
+    } else {
+        // Determine which corner region the pixel is in
+        let top = y < radius.top_left as i32;
+        let bottom = y >= height - radius.bottom_left as i32;
+        let left = x < radius.top_left as i32;
+        let right = x >= width - radius.top_right as i32;
+
+        if top && left {
+            (radius.top_left as i32, true, true)
+        } else if top && right {
+            (radius.top_right as i32, false, true)
+        } else if bottom && left {
+            (radius.bottom_left as i32, true, false)
+        } else if bottom && right {
+            (radius.bottom_right as i32, false, false)
+        } else {
+            // Not in a corner region - full coverage
+            return 255;
+        }
+    };
+
+    // Calculate distance from the circle center
+    let (cx, cy) = if corner_x {
+        (r, r)
+    } else {
+        (width - r - 1, r)
+    };
+
+    let dx = x - cx;
+    let dy = if corner_y { y - cy } else { y - (height - r - 1) };
+
+    let dist_sq = (dx * dx + dy * dy) as u32;
+    let r_sq = (r as u32) * (r as u32);
+
+    if dist_sq >= r_sq {
+        // Outside the circle - no coverage
+        return 0;
+    }
+
+    if dist_sq < ((r - 1) as u32) * ((r - 1) as u32) {
+        // Well inside the circle - full coverage
+        return 255;
+    }
+
+    // Anti-aliasing region - calculate based on distance from edge
+    // Distance from circle edge (positive = inside)
+    let dist = (dist_sq as f32).sqrt();
+    let r_f = r as f32;
+    let edge_dist = r_f - dist;
+
+    // Convert to coverage (0-255)
+    // edge_dist of 0 = 0 coverage, edge_dist of 1 = 255 coverage
+    let coverage = (edge_dist * 255.0).min(255.0).max(0.0) as u32;
+    coverage
+}
+
+/// Draw a buffer with a solid color but apply rounded corner coverage
+fn draw_with_rounded_coverage(
+    buffer: &mut [impl TargetPixel],
+    rect: &PhysicalRect,
+    line: PhysicalLength,
+    extra_left_clip: i16,
+    radius: &super::PhysicalBorderRadius,
+    mut color_fn: impl FnMut(i16) -> PremultipliedRgbaColor,
+) {
+    let start_x = rect.min_x() + extra_left_clip;
+    let end_x = start_x + buffer.len() as i16;
+
+    for (i, pix) in buffer.iter_mut().enumerate() {
+        let px = start_x + i as i16;
+        let cov = get_rounded_coverage(px, line.get(), rect, radius);
+        if cov > 0 {
+            let mut col = color_fn(px);
+            col.alpha = ((col.alpha as u32) * cov / 255) as u8;
+            col.red = ((col.red as u32) * cov / 255) as u8;
+            col.green = ((col.green as u32) * cov / 255) as u8;
+            col.blue = ((col.blue as u32) * cov / 255) as u8;
+            pix.blend(col);
+        }
+    }
+    let _ = (end_x, start_x);
+}
+
 pub(super) fn draw_linear_gradient(
     rect: &PhysicalRect,
     line: PhysicalLength,
@@ -587,7 +693,12 @@ pub(super) fn draw_linear_gradient(
         };
         if (fill_col1 || p >= 0) && (fill_col2 || p < 255) {
             let col = interpolate_color(p.clamp(0, 255) as u32, color1, color2);
-            TargetPixel::blend_slice(buffer, col);
+            if g.radius.is_zero() {
+                TargetPixel::blend_slice(buffer, col);
+            } else {
+                // Handle rounded corners with per-pixel coverage
+                draw_with_rounded_coverage(buffer, rect, line, extra_left_clip, &g.radius, |x| col);
+            }
         }
         return;
     }
@@ -607,10 +718,44 @@ pub(super) fn draw_linear_gradient(
         let l = (-x as usize).min(buffer.len());
         if invert_slope {
             if fill_col1 {
-                TargetPixel::blend_slice(&mut buffer[..l], g.color1);
+                if g.radius.is_zero() {
+                    TargetPixel::blend_slice(&mut buffer[..l], g.color1);
+                } else {
+                    let start_x = rect.min_x() + extra_left_clip;
+                    for i in 0..l {
+                        let px = start_x + i as i16;
+                        let cov = get_rounded_coverage(px, line.get(), rect, &g.radius);
+                        if cov > 0 {
+                            let col = PremultipliedRgbaColor {
+                                alpha: ((g.color1.alpha as u32) * cov as u32 / 255) as u8,
+                                red: ((g.color1.red as u32) * cov as u32 / 255) as u8,
+                                green: ((g.color1.green as u32) * cov as u32 / 255) as u8,
+                                blue: ((g.color1.blue as u32) * cov as u32 / 255) as u8,
+                            };
+                            buffer[i].blend(col);
+                        }
+                    }
+                }
             }
         } else if fill_col2 {
-            TargetPixel::blend_slice(&mut buffer[..l], g.color2);
+            if g.radius.is_zero() {
+                TargetPixel::blend_slice(&mut buffer[..l], g.color2);
+            } else {
+                let start_x = rect.min_x() + extra_left_clip;
+                for i in 0..l {
+                    let px = start_x + i as i16;
+                    let cov = get_rounded_coverage(px, line.get(), rect, &g.radius);
+                    if cov > 0 {
+                        let col = PremultipliedRgbaColor {
+                            alpha: ((g.color2.alpha as u32) * cov as u32 / 255) as u8,
+                            red: ((g.color2.red as u32) * cov as u32 / 255) as u8,
+                            green: ((g.color2.green as u32) * cov as u32 / 255) as u8,
+                            blue: ((g.color2.blue as u32) * cov as u32 / 255) as u8,
+                        };
+                        buffer[i].blend(col);
+                    }
+                }
+            }
         }
         buffer = &mut buffer[l..];
         x = 0;
@@ -620,10 +765,44 @@ pub(super) fn draw_linear_gradient(
         let l = len.saturating_sub(x as usize);
         if invert_slope {
             if fill_col2 {
-                TargetPixel::blend_slice(&mut buffer[l..], g.color2);
+                if g.radius.is_zero() {
+                    TargetPixel::blend_slice(&mut buffer[l..], g.color2);
+                } else {
+                    let start_x = rect.min_x() + extra_left_clip + (len - buffer.len()) as i16;
+                    for i in l..buffer.len() {
+                        let px = start_x + i as i16;
+                        let cov = get_rounded_coverage(px, line.get(), rect, &g.radius);
+                        if cov > 0 {
+                            let col = PremultipliedRgbaColor {
+                                alpha: ((g.color2.alpha as u32) * cov as u32 / 255) as u8,
+                                red: ((g.color2.red as u32) * cov as u32 / 255) as u8,
+                                green: ((g.color2.green as u32) * cov as u32 / 255) as u8,
+                                blue: ((g.color2.blue as u32) * cov as u32 / 255) as u8,
+                            };
+                            buffer[i].blend(col);
+                        }
+                    }
+                }
             }
         } else if fill_col1 {
-            TargetPixel::blend_slice(&mut buffer[l..], g.color1);
+            if g.radius.is_zero() {
+                TargetPixel::blend_slice(&mut buffer[l..], g.color1);
+            } else {
+                let start_x = rect.min_x() + extra_left_clip + (len - buffer.len()) as i16;
+                for i in l..buffer.len() {
+                    let px = start_x + i as i16;
+                    let cov = get_rounded_coverage(px, line.get(), rect, &g.radius);
+                    if cov > 0 {
+                        let col = PremultipliedRgbaColor {
+                            alpha: ((g.color1.alpha as u32) * cov as u32 / 255) as u8,
+                            red: ((g.color1.red as u32) * cov as u32 / 255) as u8,
+                            green: ((g.color1.green as u32) * cov as u32 / 255) as u8,
+                            blue: ((g.color1.blue as u32) * cov as u32 / 255) as u8,
+                        };
+                        buffer[i].blend(col);
+                    }
+                }
+            }
         }
         buffer = &mut buffer[..l];
     }
@@ -642,15 +821,38 @@ pub(super) fn draw_linear_gradient(
     let da = (((color2.alpha as i32 - color1.alpha as i32) * start) << 15) / (255 * size_x);
 
     let mut r = ((color1.red as u32) << 15).wrapping_add((x * dr) as _);
-    let mut g = ((color1.green as u32) << 15).wrapping_add((x * dg) as _);
+    let mut green_val = ((color1.green as u32) << 15).wrapping_add((x * dg) as _);
     let mut b = ((color1.blue as u32) << 15).wrapping_add((x * db) as _);
     let mut a = ((color1.alpha as u32) << 15).wrapping_add((x * da) as _);
 
-    if color1.alpha == 255 && color2.alpha == 255 {
-        buffer.fill_with(|| {
-            let pix = TargetPixel::from_rgb((r >> 15) as u8, (g >> 15) as u8, (b >> 15) as u8);
+    // When radius is non-zero, use per-pixel coverage calculation
+    if !g.radius.is_zero() {
+        let start_x = rect.min_x() + extra_left_clip;
+        let grad_radius = &g.radius;
+        let mut pix_index = 0;
+        for pix in buffer {
+            let px = start_x + pix_index;
+            let cov = get_rounded_coverage(px, line.get(), rect, grad_radius);
+            if cov > 0 {
+                let col = PremultipliedRgbaColor {
+                    red: (r >> 15) as u8,
+                    green: (green_val >> 15) as u8,
+                    blue: (b >> 15) as u8,
+                    alpha: (((a >> 15) as u32 * cov / 255) as u8),
+                };
+                pix.blend(col);
+            }
             r = r.wrapping_add(dr as _);
-            g = g.wrapping_add(dg as _);
+            green_val = green_val.wrapping_add(dg as _);
+            b = b.wrapping_add(db as _);
+            a = a.wrapping_add(da as _);
+            pix_index += 1;
+        }
+    } else if color1.alpha == 255 && color2.alpha == 255 {
+        buffer.fill_with(|| {
+            let pix = TargetPixel::from_rgb((r >> 15) as u8, (green_val >> 15) as u8, (b >> 15) as u8);
+            r = r.wrapping_add(dr as _);
+            green_val = green_val.wrapping_add(dg as _);
             b = b.wrapping_add(db as _);
             pix
         })
@@ -658,12 +860,12 @@ pub(super) fn draw_linear_gradient(
         for pix in buffer {
             pix.blend(PremultipliedRgbaColor {
                 red: (r >> 15) as u8,
-                green: (g >> 15) as u8,
+                green: (green_val >> 15) as u8,
                 blue: (b >> 15) as u8,
                 alpha: (a >> 15) as u8,
             });
             r = r.wrapping_add(dr as _);
-            g = g.wrapping_add(dg as _);
+            green_val = green_val.wrapping_add(dg as _);
             b = b.wrapping_add(db as _);
             a = a.wrapping_add(da as _);
         }
@@ -704,6 +906,18 @@ pub(super) fn draw_radial_gradient(
 
     for (i, pixel) in buffer.iter_mut().enumerate() {
         let x = start_x + i as i16;
+
+        // Check rounded coverage if radius is non-zero
+        let cov = if !g.radius.is_zero() {
+            get_rounded_coverage(x, line.get(), rect, &g.radius)
+        } else {
+            255
+        };
+
+        if cov == 0 {
+            continue;
+        }
+
         let dx = (x as i32 - center_x) as f32;
         let distance = (dx * dx + dy_squared).sqrt();
         let position = (distance / max_radius).clamp(0.0, 1.0);
@@ -738,7 +952,15 @@ pub(super) fn draw_radial_gradient(
             }
         }
 
-        pixel.blend(super::PremultipliedRgbaColor::from(color));
+        let mut col = super::PremultipliedRgbaColor::from(color);
+        // Apply rounded coverage
+        if cov < 255 {
+            col.alpha = ((col.alpha as u32) * cov as u32 / 255) as u8;
+            col.red = ((col.red as u32) * cov as u32 / 255) as u8;
+            col.green = ((col.green as u32) * cov as u32 / 255) as u8;
+            col.blue = ((col.blue as u32) * cov as u32 / 255) as u8;
+        }
+        pixel.blend(col);
     }
 }
 
@@ -764,6 +986,18 @@ pub(super) fn draw_conic_gradient(
 
     for (i, pixel) in buffer.iter_mut().enumerate() {
         let x = (start_x + i as i16) as f32;
+        let px = start_x + i as i16;
+
+        // Check rounded coverage if radius is non-zero
+        let cov = if !g.radius.is_zero() {
+            get_rounded_coverage(px, line.get(), rect, &g.radius)
+        } else {
+            255
+        };
+
+        if cov == 0 {
+            continue;
+        }
 
         // Calculate angle from center to current pixel
         let dx = x - center_x;
@@ -814,7 +1048,15 @@ pub(super) fn draw_conic_gradient(
             }
         }
 
-        pixel.blend(super::PremultipliedRgbaColor::from(color));
+        let mut col = super::PremultipliedRgbaColor::from(color);
+        // Apply rounded coverage
+        if cov < 255 {
+            col.alpha = ((col.alpha as u32) * cov as u32 / 255) as u8;
+            col.red = ((col.red as u32) * cov as u32 / 255) as u8;
+            col.green = ((col.green as u32) * cov as u32 / 255) as u8;
+            col.blue = ((col.blue as u32) * cov as u32 / 255) as u8;
+        }
+        pixel.blend(col);
     }
 }
 
@@ -827,7 +1069,7 @@ pub(super) fn draw_conic_gradient(
 /// the [`From`] trait. This conversion will pre-multiply the color
 /// components
 #[allow(missing_docs)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct PremultipliedRgbaColor {
     pub red: u8,
