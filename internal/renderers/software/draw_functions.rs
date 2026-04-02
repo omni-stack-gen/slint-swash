@@ -584,13 +584,40 @@ fn get_rounded_coverage(
     let y = (py - rect.min_y()) as i32;
 
     let (r, corner_x, corner_y) = if let Some(r) = radius.as_uniform() {
-        (r as i32, true, true)
+        // Even with uniform radius, we need to determine which corner the pixel is in
+        let r = r as i32;
+        // Use > for bottom/right boundaries to match original draw_rounded_rectangle_line's
+        // y2 = height - line - 1 calculation (0-indexed from bottom)
+        if x < r && y < r {
+            // Top-left corner
+            (r, true, true)
+        } else if x > width - r - 1 && y < r {
+            // Top-right corner (x > width - r - 1 means x >= width - r)
+            (r, false, true)
+        } else if x < r && y > height - r - 1 {
+            // Bottom-left corner (y > height - r - 1 means y >= height - r)
+            (r, true, false)
+        } else if x > width - r - 1 && y > height - r - 1 {
+            // Bottom-right corner
+            (r, false, false)
+        } else {
+            // Not in a corner region - full coverage
+            return 255;
+        }
     } else {
         // Determine which corner region the pixel is in
-        let top = y < radius.top_left as i32;
-        let bottom = y >= height - radius.bottom_left as i32;
-        let left = x < radius.top_left as i32;
-        let right = x >= width - radius.top_right as i32;
+        // Use the max radius for each edge to properly handle non-uniform radii
+        let left_edge_width = radius.top_left.max(radius.bottom_left) as i32;
+        let right_edge_start = width - radius.top_right.max(radius.bottom_right) as i32;
+        let top_edge_height = radius.top_left.max(radius.top_right) as i32;
+        let bottom_edge_start = height - radius.bottom_left.max(radius.bottom_right) as i32;
+
+        // Use > for bottom/right boundaries to match original draw_rounded_rectangle_line's
+        // y2 = height - line - 1 and x2 = width - x - 1 calculation
+        let top = y < top_edge_height;
+        let bottom = y > bottom_edge_start - 1; // y >= bottom_edge_start
+        let left = x < left_edge_width;
+        let right = x > right_edge_start - 1; // x >= right_edge_start
 
         if top && left {
             (radius.top_left as i32, true, true)
@@ -607,33 +634,36 @@ fn get_rounded_coverage(
     };
 
     // Calculate distance from the circle center
-    let (cx, cy) = if corner_x {
-        (r, r)
-    } else {
-        (width - r - 1, r)
-    };
+    // Pixel centers are at (x + 0.5, y + 0.5)
+    // Circle center for left corners: (r - 0.5, r - 0.5) to align with pixel edges
+    // This ensures the circle passes through (0, r) and (r, 0) at pixel boundaries
+    let cx_numer = if corner_x { r * 2 - 1 } else { (width - r) * 2 + 1 };
+    let cy_numer = if corner_y { r * 2 - 1 } else { (height - r) * 2 + 1 };
 
-    let dx = x - cx;
-    let dy = if corner_y { y - cy } else { y - (height - r - 1) };
+    // Use pixel center for distance calculation
+    // Pixel center at (x*2+1, y*2+1) in half-pixel units
+    let dx_numer = x * 2 + 1 - cx_numer;
+    let dy_numer = y * 2 + 1 - cy_numer;
+    let dist_sq_numer = (dx_numer * dx_numer + dy_numer * dy_numer) as u32;
+    let r2 = (r * 2) as u32;
+    let r2_sq = r2 * r2;
 
-    let dist_sq = (dx * dx + dy * dy) as u32;
-    let r_sq = (r as u32) * (r as u32);
-
-    if dist_sq >= r_sq {
+    if dist_sq_numer >= r2_sq {
         // Outside the circle - no coverage
         return 0;
     }
 
-    if dist_sq < ((r - 1) as u32) * ((r - 1) as u32) {
+    // Inner threshold: (r-1)*2 squared
+    let inner_threshold = ((r - 1) * 2) as u32;
+    if dist_sq_numer < inner_threshold * inner_threshold {
         // Well inside the circle - full coverage
         return 255;
     }
 
     // Anti-aliasing region - calculate based on distance from edge
     // Distance from circle edge (positive = inside)
-    let dist = (dist_sq as f32).sqrt();
-    let r_f = r as f32;
-    let edge_dist = r_f - dist;
+    let dist = (dist_sq_numer as f32).sqrt() / 2.0;
+    let edge_dist = r as f32 - dist;
 
     // Convert to coverage (0-255)
     // edge_dist of 0 = 0 coverage, edge_dist of 1 = 255 coverage
@@ -657,11 +687,13 @@ fn draw_with_rounded_coverage(
         let px = start_x + i as i16;
         let cov = get_rounded_coverage(px, line.get(), rect, radius);
         if cov > 0 {
-            let mut col = color_fn(px);
-            col.alpha = ((col.alpha as u32) * cov / 255) as u8;
-            col.red = ((col.red as u32) * cov / 255) as u8;
-            col.green = ((col.green as u32) * cov / 255) as u8;
-            col.blue = ((col.blue as u32) * cov / 255) as u8;
+            let col = color_fn(px);
+            let col = PremultipliedRgbaColor {
+                alpha: ((col.alpha as u32) * cov / 255) as u8,
+                red: ((col.red as u32) * cov / 255) as u8,
+                green: ((col.green as u32) * cov / 255) as u8,
+                blue: ((col.blue as u32) * cov / 255) as u8,
+            };
             pix.blend(col);
         }
     }
@@ -834,11 +866,12 @@ pub(super) fn draw_linear_gradient(
             let px = start_x + pix_index;
             let cov = get_rounded_coverage(px, line.get(), rect, grad_radius);
             if cov > 0 {
+                let alpha_val = (a >> 15) as u8;
                 let col = PremultipliedRgbaColor {
-                    red: (r >> 15) as u8,
-                    green: (green_val >> 15) as u8,
-                    blue: (b >> 15) as u8,
-                    alpha: (((a >> 15) as u32 * cov / 255) as u8),
+                    red: ((r >> 15) as u32 * cov / 255) as u8,
+                    green: ((green_val >> 15) as u32 * cov / 255) as u8,
+                    blue: ((b >> 15) as u32 * cov / 255) as u8,
+                    alpha: ((alpha_val as u32 * cov / 255) as u8),
                 };
                 pix.blend(col);
             }
@@ -952,14 +985,18 @@ pub(super) fn draw_radial_gradient(
             }
         }
 
-        let mut col = super::PremultipliedRgbaColor::from(color);
-        // Apply rounded coverage
-        if cov < 255 {
-            col.alpha = ((col.alpha as u32) * cov as u32 / 255) as u8;
-            col.red = ((col.red as u32) * cov as u32 / 255) as u8;
-            col.green = ((col.green as u32) * cov as u32 / 255) as u8;
-            col.blue = ((col.blue as u32) * cov as u32 / 255) as u8;
-        }
+        let col = super::PremultipliedRgbaColor::from(color);
+        // Apply rounded coverage - for pre-multiplied colors, coverage affects all channels
+        let col = if cov < 255 {
+            PremultipliedRgbaColor {
+                alpha: ((col.alpha as u32) * cov as u32 / 255) as u8,
+                red: ((col.red as u32) * cov as u32 / 255) as u8,
+                green: ((col.green as u32) * cov as u32 / 255) as u8,
+                blue: ((col.blue as u32) * cov as u32 / 255) as u8,
+            }
+        } else {
+            col
+        };
         pixel.blend(col);
     }
 }
@@ -1048,14 +1085,18 @@ pub(super) fn draw_conic_gradient(
             }
         }
 
-        let mut col = super::PremultipliedRgbaColor::from(color);
-        // Apply rounded coverage
-        if cov < 255 {
-            col.alpha = ((col.alpha as u32) * cov as u32 / 255) as u8;
-            col.red = ((col.red as u32) * cov as u32 / 255) as u8;
-            col.green = ((col.green as u32) * cov as u32 / 255) as u8;
-            col.blue = ((col.blue as u32) * cov as u32 / 255) as u8;
-        }
+        let col = super::PremultipliedRgbaColor::from(color);
+        // Apply rounded coverage - for pre-multiplied colors, coverage affects all channels
+        let col = if cov < 255 {
+            PremultipliedRgbaColor {
+                alpha: ((col.alpha as u32) * cov as u32 / 255) as u8,
+                red: ((col.red as u32) * cov as u32 / 255) as u8,
+                green: ((col.green as u32) * cov as u32 / 255) as u8,
+                blue: ((col.blue as u32) * cov as u32 / 255) as u8,
+            }
+        } else {
+            col
+        };
         pixel.blend(col);
     }
 }
