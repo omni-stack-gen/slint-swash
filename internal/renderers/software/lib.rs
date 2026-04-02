@@ -27,6 +27,7 @@ pub use self::minimal_software_window::MinimalSoftwareWindow;
 use self::scene::*;
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
+use alloc::vec;
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
 use euclid::Length;
@@ -2443,6 +2444,186 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             color
         }
     }
+
+    /// Render the shadow shape (white alpha mask) into the buffer
+    fn render_shadow_shape(
+        &self,
+        data: &mut [u8],
+        width: usize,
+        height: usize,
+        shape_x: i16,
+        shape_y: i16,
+        shape_width: i16,
+        shape_height: i16,
+        tl_radius: i16,
+        tr_radius: i16,
+        bl_radius: i16,
+        br_radius: i16,
+    ) {
+        for y in 0..height {
+            for x in 0..width {
+                let px = x as i16;
+                let py = y as i16;
+
+                // Check if pixel is inside the rounded rectangle
+                let inside = self.point_in_rounded_rect(
+                    px, py,
+                    shape_x, shape_y,
+                    shape_width, shape_height,
+                    tl_radius, tr_radius,
+                    bl_radius, br_radius,
+                );
+
+                let idx = (y * width + x) * 4;
+                if inside {
+                    // White with full alpha (will be blurred and colored later)
+                    data[idx] = 255;     // R
+                    data[idx + 1] = 255; // G
+                    data[idx + 2] = 255; // B
+                    data[idx + 3] = 255; // A
+                } else {
+                    // Transparent
+                    data[idx] = 0;
+                    data[idx + 1] = 0;
+                    data[idx + 2] = 0;
+                    data[idx + 3] = 0;
+                }
+            }
+        }
+    }
+
+    /// Check if a point is inside a rounded rectangle
+    fn point_in_rounded_rect(
+        &self,
+        px: i16, py: i16,
+        rx: i16, ry: i16,
+        rw: i16, rh: i16,
+        tl_r: i16, tr_r: i16,
+        bl_r: i16, br_r: i16,
+    ) -> bool {
+        // Check if inside the main rectangle
+        if px < rx || px >= rx + rw || py < ry || py >= ry + rh {
+            return false;
+        }
+
+        // Check corners
+        let x_in_left = px - rx;
+        let x_in_right = rx + rw - px - 1;
+        let y_in_top = py - ry;
+        let y_in_bottom = ry + rh - py - 1;
+
+        // Top-left corner
+        if x_in_left < tl_r && y_in_top < tl_r {
+            return self.point_in_circle_corner(x_in_left, y_in_top, tl_r);
+        }
+        // Top-right corner
+        if x_in_right < tr_r && y_in_top < tr_r {
+            return self.point_in_circle_corner(x_in_right, y_in_top, tr_r);
+        }
+        // Bottom-left corner
+        if x_in_left < bl_r && y_in_bottom < bl_r {
+            return self.point_in_circle_corner(x_in_left, y_in_bottom, bl_r);
+        }
+        // Bottom-right corner
+        if x_in_right < br_r && y_in_bottom < br_r {
+            return self.point_in_circle_corner(x_in_right, y_in_bottom, br_r);
+        }
+
+        true
+    }
+
+    /// Check if a point is inside a circle corner (for rounded rect)
+    fn point_in_circle_corner(&self, dx: i16, dy: i16, r: i16) -> bool {
+        if r <= 0 {
+            return true;
+        }
+        // Check if point (dx, dy) is inside the circle quadrant
+        // Circle center is at (r-0.5, r-0.5)
+        let cx = r - 1;
+        let cy = r - 1;
+        let dist_sq = (dx - cx) * (dx - cx) + (dy - cy) * (dy - cy);
+        dist_sq <= r * r
+    }
+
+    /// Apply Gaussian blur to the alpha channel
+    fn apply_gaussian_blur(&self, data: &mut [u8], width: usize, height: usize, sigma: f32) {
+        if sigma <= 0.0 {
+            return;
+        }
+
+        let sigma = sigma.max(0.5);
+        let kernel_size = ((sigma * 6.0).ceil() as usize).min(51).max(3);
+        let kernel_radius = kernel_size / 2;
+
+        // Generate Gaussian kernel
+        let mut kernel = vec![0.0f32; kernel_size];
+        let two_sigma_sq = 2.0 * sigma * sigma;
+        let mut kernel_sum = 0.0;
+
+        for i in 0..kernel_size {
+            let x = i as f32 - kernel_radius as f32;
+            let value = (-(x * x) / two_sigma_sq).exp();
+            kernel[i] = value;
+            kernel_sum += value;
+        }
+
+        // Normalize kernel
+        for v in &mut kernel {
+            *v /= kernel_sum;
+        }
+
+        // Temporary buffer for horizontal pass
+        let mut temp = vec![0u8; width * height];
+
+        // Horizontal pass (blur alpha only)
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum = 0.0;
+                for (ki, &kval) in kernel.iter().enumerate() {
+                    let sx = x as i32 + ki as i32 - kernel_radius as i32;
+                    let sx = sx.clamp(0, width as i32 - 1) as usize;
+                    let idx = (y * width + sx) * 4 + 3; // Alpha channel
+                    sum += data[idx] as f32 * kval;
+                }
+                temp[y * width + x] = sum.min(255.0).max(0.0) as u8;
+            }
+        }
+
+        // Vertical pass
+        for x in 0..width {
+            for y in 0..height {
+                let mut sum = 0.0;
+                for (ki, &kval) in kernel.iter().enumerate() {
+                    let sy = y as i32 + ki as i32 - kernel_radius as i32;
+                    let sy = sy.clamp(0, height as i32 - 1) as usize;
+                    let alpha = temp[sy * width + x];
+                    sum += alpha as f32 * kval;
+                }
+                let idx = (y * width + x) * 4 + 3;
+                data[idx] = sum.min(255.0).max(0.0) as u8;
+            }
+        }
+    }
+
+    /// Apply shadow color to the blurred alpha mask
+    /// Apply shadow color to the blurred alpha mask
+    fn apply_shadow_color(&self, data: &mut [u8], color: &Color) {
+        let r = color.red();
+        let g = color.green();
+        let b = color.blue();
+        let color_alpha = color.alpha() as u16;
+
+        for i in (0..data.len()).step_by(4) {
+            let shape_alpha = data[i + 3] as u16;
+            // Combine shape alpha with color alpha
+            let final_alpha = (shape_alpha * color_alpha / 255) as u8;
+            // Premultiply color with final alpha
+            data[i] = (r as u16 * final_alpha as u16 / 255) as u8;     // R
+            data[i + 1] = (g as u16 * final_alpha as u16 / 255) as u8; // G
+            data[i + 2] = (b as u16 * final_alpha as u16 / 255) as u8; // B
+            data[i + 3] = final_alpha; // Update alpha channel
+        }
+    }
 }
 
 fn alpha_color(color: Color, alpha: u8) -> Color {
@@ -2973,11 +3154,131 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
     fn draw_box_shadow(
         &mut self,
-        _box_shadow: Pin<&i_slint_core::items::BoxShadow>,
-        _: &ItemRc,
-        _size: LogicalSize,
+        box_shadow: Pin<&i_slint_core::items::BoxShadow>,
+        item_rc: &ItemRc,
+        size: LogicalSize,
     ) {
-        // TODO
+        // Get shadow properties
+        let color = box_shadow.color();
+        if color.alpha() == 0 {
+            return;
+        }
+
+        let blur = box_shadow.blur() * self.scale_factor;
+        let offset_x = box_shadow.offset_x() * self.scale_factor;
+        let offset_y = box_shadow.offset_y() * self.scale_factor;
+        let radius = box_shadow.border_radius() * self.scale_factor;
+
+        // If no blur and no offset, nothing to render
+        if blur.get() <= 0.0 && offset_x.get() == 0.0 && offset_y.get() == 0.0 {
+            return;
+        }
+
+        let geom = LogicalRect::from(size);
+        if !self.should_draw(&geom) {
+            return;
+        }
+
+        // Calculate physical geometry
+        let physical_geom = (geom.translate(self.current_state.offset.to_vector()).cast()
+            * self.scale_factor)
+            .round()
+            .cast()
+            .transformed(self.rotation);
+
+        let clipped =
+            (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
+                * self.scale_factor)
+                .round()
+                .cast()
+                .transformed(self.rotation);
+
+        // Calculate shadow bounds (including blur and offset)
+        let blur_px = blur.get().ceil() as i16;
+        let offset_x_px = offset_x.get() as i16;
+        let offset_y_px = offset_y.get() as i16;
+
+        // Shadow texture size includes the original rectangle plus blur on all sides
+        let shadow_width = physical_geom.width() + blur_px * 2;
+        let shadow_height = physical_geom.height() + blur_px * 2;
+
+        if shadow_width <= 0 || shadow_height <= 0 {
+            return;
+        }
+
+        // Create shadow texture data
+        let mut shadow_data = vec![0u8; (shadow_width as usize) * (shadow_height as usize) * 4];
+
+        // Fill the shadow with the shape (white on transparent background)
+        let shape_x = blur_px;
+        let shape_y = blur_px;
+        let shape_width = physical_geom.width();
+        let shape_height = physical_geom.height();
+
+        let radius_px = radius.get() as i16;
+
+        // Draw the rounded rectangle shape into the shadow buffer
+        self.render_shadow_shape(
+            &mut shadow_data,
+            shadow_width as usize,
+            shadow_height as usize,
+            shape_x,
+            shape_y,
+            shape_width,
+            shape_height,
+            radius_px,
+            radius_px,
+            radius_px,
+            radius_px,
+        );
+
+        // Apply Gaussian blur to the shadow
+        if blur_px > 0 {
+            self.apply_gaussian_blur(
+                &mut shadow_data,
+                shadow_width as usize,
+                shadow_height as usize,
+                blur.get() / 2.0, // sigma = blur / 2
+            );
+        }
+
+        // Apply shadow color to the blurred alpha
+        self.apply_shadow_color(&mut shadow_data, &color);
+
+        // Create texture args for the shadow
+        let shadow_buffer = SharedPixelBuffer::clone_from_slice(
+            &shadow_data,
+            shadow_width as u32,
+            shadow_height as u32,
+        );
+
+        let shadow_img = SharedImageBuffer::RGBA8Premultiplied(shadow_buffer);
+
+        // Calculate shadow position (with offset)
+        let shadow_x = physical_geom.min_x() + offset_x_px - blur_px;
+        let shadow_y = physical_geom.min_y() + offset_y_px - blur_px;
+
+        // Create texture args
+        let texture_args = target_pixel_buffer::DrawTextureArgs {
+            data: target_pixel_buffer::TextureDataContainer::Shared {
+                buffer: SharedBufferData::SharedImage(shadow_img),
+                source_rect: PhysicalRect::new(
+                    PhysicalPoint::new(0, 0),
+                    PhysicalSize::new(shadow_width, shadow_height),
+                ),
+            },
+            colorize: None,
+            alpha: (self.current_state.alpha * 255.0) as u8,
+            dst_x: shadow_x as isize,
+            dst_y: shadow_y as isize,
+            dst_width: shadow_width as usize,
+            dst_height: shadow_height as usize,
+            rotation: self.rotation.orientation,
+            tiling: None,
+        };
+
+        // Draw the shadow texture
+        self.processor.process_target_texture(&texture_args, clipped);
     }
 
     fn combine_clip(
