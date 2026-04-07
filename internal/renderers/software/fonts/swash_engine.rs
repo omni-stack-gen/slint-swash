@@ -132,26 +132,27 @@ impl SwashEngine {
         // weight 400 = 正常，0次
         // weight 500-600 = 半粗，1次
         // weight 700-800 = 粗体，1-2次（保守设置，避免过大）
-        let bold_iterations = if weight <= 400 {
-            0
-        } else if weight <= 600 {
-            if size_px >= 24.0 {
-                1 // 中大字（如24px）
-            } else {
-                0 // 小字不需要膨胀，保持清晰
-            }
-        } else if weight <= 800 {
-            // 大字只需要1-2次，小字不膨胀（避免小字糊成一团）
-            if size_px >= 48.0 {
-                2 // 特大字（如140px的"26"）
-            } else if size_px >= 24.0 {
-                1 // 中大字（如24px）
-            } else {
-                0 // 小字不需要膨胀，保持清晰
-            }
-        } else {
-            if size_px >= 48.0 { 2 } else { 1 }
-        };
+        let bold_iterations = 0;
+        // if weight <= 400 {
+        //     0
+        // } else if weight <= 600 {
+        //     if size_px >= 36.0 {
+        //         0 // 中大字（如24px）
+        //     } else {
+        //         0 // 小字不需要膨胀，保持清晰
+        //     }
+        // } else if weight <= 800 {
+        //     // 大字只需要1-2次，小字不膨胀（避免小字糊成一团）
+        //     if size_px >= 48.0 {
+        //         2 // 特大字（如140px的"26"）
+        //     } else if size_px >= 36.0 {
+        //         1 // 中大字（如24px）
+        //     } else {
+        //         0 // 小字不需要膨胀，保持清晰
+        //     }
+        // } else {
+        //     if size_px >= 48.0 { 2 } else { 1 }
+        // };
 
         // 计算膨胀后的尺寸和坐标调整
         let (data, width, height, left_adjust, top_adjust) = if bold_iterations > 0
