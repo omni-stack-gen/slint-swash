@@ -794,7 +794,7 @@ pub(super) fn draw_linear_gradient(
     }
 
     if buffer.len() + x as usize > len {
-        let l = len.saturating_sub(x as usize);
+        let l = len.saturating_sub(x as usize).saturating_add(1).min(buffer.len());
         if invert_slope {
             if fill_col2 {
                 if g.radius.is_zero() {
