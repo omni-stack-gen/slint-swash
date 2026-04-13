@@ -2545,62 +2545,53 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         dist_sq <= r * r
     }
 
-    /// Apply Gaussian blur to the alpha channel
-    fn apply_gaussian_blur(&self, data: &mut [u8], width: usize, height: usize, sigma: f32) {
-        if sigma <= 0.0 {
+    /// Apply a separable box blur to the alpha channel.
+    fn apply_box_blur(&self, data: &mut [u8], width: usize, height: usize, blur: f32) {
+        if blur <= 0.0 || width == 0 || height == 0 {
             return;
         }
 
-        let sigma = sigma.max(0.5);
-        let kernel_size = ((sigma * 6.0).ceil() as usize).min(51).max(3);
-        let kernel_radius = kernel_size / 2;
-
-        // Generate Gaussian kernel
-        let mut kernel = vec![0.0f32; kernel_size];
-        let two_sigma_sq = 2.0 * sigma * sigma;
-        let mut kernel_sum = 0.0;
-
-        for i in 0..kernel_size {
-            let x = i as f32 - kernel_radius as f32;
-            let value = (-(x * x) / two_sigma_sq).exp();
-            kernel[i] = value;
-            kernel_sum += value;
-        }
-
-        // Normalize kernel
-        for v in &mut kernel {
-            *v /= kernel_sum;
-        }
-
-        // Temporary buffer for horizontal pass
+        let radius = (blur / 2.0).ceil().max(1.0) as usize;
+        let window_size = (radius * 2 + 1) as u32;
         let mut temp = vec![0u8; width * height];
 
-        // Horizontal pass (blur alpha only)
         for y in 0..height {
+            let row_start = y * width;
+            let mut sum = 0u32;
+            for k in 0..=radius * 2 {
+                let sx = k.saturating_sub(radius).min(width - 1);
+                sum += data[(row_start + sx) * 4 + 3] as u32;
+            }
+
             for x in 0..width {
-                let mut sum = 0.0;
-                for (ki, &kval) in kernel.iter().enumerate() {
-                    let sx = x as i32 + ki as i32 - kernel_radius as i32;
-                    let sx = sx.clamp(0, width as i32 - 1) as usize;
-                    let idx = (y * width + sx) * 4 + 3; // Alpha channel
-                    sum += data[idx] as f32 * kval;
+                temp[row_start + x] = (sum / window_size) as u8;
+
+                if x + 1 < width {
+                    let remove_x = x.saturating_sub(radius);
+                    let add_x = (x + radius + 1).min(width - 1);
+                    sum += data[(row_start + add_x) * 4 + 3] as u32;
+                    sum -= data[(row_start + remove_x) * 4 + 3] as u32;
                 }
-                temp[y * width + x] = sum.min(255.0).max(0.0) as u8;
             }
         }
 
-        // Vertical pass
         for x in 0..width {
+            let mut sum = 0u32;
+            for k in 0..=radius * 2 {
+                let sy = k.saturating_sub(radius).min(height - 1);
+                sum += temp[sy * width + x] as u32;
+            }
+
             for y in 0..height {
-                let mut sum = 0.0;
-                for (ki, &kval) in kernel.iter().enumerate() {
-                    let sy = y as i32 + ki as i32 - kernel_radius as i32;
-                    let sy = sy.clamp(0, height as i32 - 1) as usize;
-                    let alpha = temp[sy * width + x];
-                    sum += alpha as f32 * kval;
-                }
                 let idx = (y * width + x) * 4 + 3;
-                data[idx] = sum.min(255.0).max(0.0) as u8;
+                data[idx] = (sum / window_size) as u8;
+
+                if y + 1 < height {
+                    let remove_y = y.saturating_sub(radius);
+                    let add_y = (y + radius + 1).min(height - 1);
+                    sum += temp[add_y * width + x] as u32;
+                    sum -= temp[remove_y * width + x] as u32;
+                }
             }
         }
     }
@@ -3215,7 +3206,12 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         let shape_width = physical_geom.width();
         let shape_height = physical_geom.height();
 
-        let radius_px = radius.get() as i16;
+        let radius_px = radius
+            .get()
+            .min(shape_width as f32 / 2.0)
+            .min(shape_height as f32 / 2.0)
+            .max(0.0)
+            .ceil() as i16;
 
         // Draw the rounded rectangle shape into the shadow buffer
         self.render_shadow_shape(
@@ -3232,15 +3228,13 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
             radius_px,
         );
 
-        // Apply Gaussian blur to the shadow
-        // TODO: Temporarily disabled for performance optimization
-        const ENABLE_GAUSSIAN_BLUR: bool = false;
-        if ENABLE_GAUSSIAN_BLUR && blur_px > 0 {
-            self.apply_gaussian_blur(
+        // Apply a cheap separable box blur to the shadow
+        if blur_px > 0 {
+            self.apply_box_blur(
                 &mut shadow_data,
                 shadow_width as usize,
                 shadow_height as usize,
-                blur.get() / 2.0, // sigma = blur / 2
+                blur.get(),
             );
         }
 
