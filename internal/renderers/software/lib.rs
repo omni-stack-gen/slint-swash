@@ -2445,7 +2445,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         }
     }
 
-    /// Render the shadow shape (white alpha mask) into the buffer
+    /// Render the shadow shape into an alpha mask.
     fn render_shadow_shape(
         &self,
         data: &mut [u8],
@@ -2474,20 +2474,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                     bl_radius, br_radius,
                 );
 
-                let idx = (y * width + x) * 4;
-                if inside {
-                    // White with full alpha (will be blurred and colored later)
-                    data[idx] = 255;     // R
-                    data[idx + 1] = 255; // G
-                    data[idx + 2] = 255; // B
-                    data[idx + 3] = 255; // A
-                } else {
-                    // Transparent
-                    data[idx] = 0;
-                    data[idx + 1] = 0;
-                    data[idx + 2] = 0;
-                    data[idx + 3] = 0;
-                }
+                let idx = y * width + x;
+                data[idx] = if inside { 255 } else { 0 };
             }
         }
     }
@@ -2560,7 +2548,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             let mut sum = 0u32;
             for k in 0..=radius * 2 {
                 let sx = k.saturating_sub(radius).min(width - 1);
-                sum += data[(row_start + sx) * 4 + 3] as u32;
+                sum += data[row_start + sx] as u32;
             }
 
             for x in 0..width {
@@ -2569,8 +2557,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                 if x + 1 < width {
                     let remove_x = x.saturating_sub(radius);
                     let add_x = (x + radius + 1).min(width - 1);
-                    sum += data[(row_start + add_x) * 4 + 3] as u32;
-                    sum -= data[(row_start + remove_x) * 4 + 3] as u32;
+                    sum += data[row_start + add_x] as u32;
+                    sum -= data[row_start + remove_x] as u32;
                 }
             }
         }
@@ -2583,8 +2571,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             }
 
             for y in 0..height {
-                let idx = (y * width + x) * 4 + 3;
-                data[idx] = (sum / window_size) as u8;
+                data[y * width + x] = (sum / window_size) as u8;
 
                 if y + 1 < height {
                     let remove_y = y.saturating_sub(radius);
@@ -2593,26 +2580,6 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                     sum -= temp[remove_y * width + x] as u32;
                 }
             }
-        }
-    }
-
-    /// Apply shadow color to the blurred alpha mask
-    /// Apply shadow color to the blurred alpha mask
-    fn apply_shadow_color(&self, data: &mut [u8], color: &Color) {
-        let r = color.red();
-        let g = color.green();
-        let b = color.blue();
-        let color_alpha = color.alpha() as u16;
-
-        for i in (0..data.len()).step_by(4) {
-            let shape_alpha = data[i + 3] as u16;
-            // Combine shape alpha with color alpha
-            let final_alpha = (shape_alpha * color_alpha / 255) as u8;
-            // Premultiply color with final alpha
-            data[i] = (r as u16 * final_alpha as u16 / 255) as u8;     // R
-            data[i + 1] = (g as u16 * final_alpha as u16 / 255) as u8; // G
-            data[i + 2] = (b as u16 * final_alpha as u16 / 255) as u8; // B
-            data[i + 3] = final_alpha; // Update alpha channel
         }
     }
 }
@@ -3197,27 +3164,44 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
             return;
         }
 
-        // Create shadow texture data
-        let mut shadow_data = vec![0u8; (shadow_width as usize) * (shadow_height as usize) * 4];
+        let shadow_downscale = if blur_px >= 32 {
+            4
+        } else if blur_px >= 8 {
+            2
+        } else {
+            1
+        };
+        let scale_i32 = shadow_downscale as i32;
+        let scale_length = |value: i16| ((value as i32 + scale_i32 - 1) / scale_i32) as i16;
+
+        let source_shadow_width = scale_length(shadow_width).max(1);
+        let source_shadow_height = scale_length(shadow_height).max(1);
+
+        // Create a low-resolution alpha mask. Large shadows are blurry by nature, so scaling the
+        // mask down before blurring saves a lot of embedded CPU time with little visual impact.
+        let mut shadow_data =
+            vec![0u8; (source_shadow_width as usize) * (source_shadow_height as usize)];
 
         // Fill the shadow with the shape (white on transparent background)
-        let shape_x = blur_px;
-        let shape_y = blur_px;
-        let shape_width = physical_geom.width();
-        let shape_height = physical_geom.height();
+        let shape_x = scale_length(blur_px);
+        let shape_y = scale_length(blur_px);
+        let shape_width = scale_length(physical_geom.width());
+        let shape_height = scale_length(physical_geom.height());
 
         let radius_px = radius
             .get()
-            .min(shape_width as f32 / 2.0)
-            .min(shape_height as f32 / 2.0)
+            .min(physical_geom.width() as f32 / 2.0)
+            .min(physical_geom.height() as f32 / 2.0)
             .max(0.0)
-            .ceil() as i16;
+            / shadow_downscale as f32;
+        let radius_px =
+            (radius_px.ceil() as i16).min(shape_width / 2).min(shape_height / 2).max(0);
 
         // Draw the rounded rectangle shape into the shadow buffer
         self.render_shadow_shape(
             &mut shadow_data,
-            shadow_width as usize,
-            shadow_height as usize,
+            source_shadow_width as usize,
+            source_shadow_height as usize,
             shape_x,
             shape_y,
             shape_width,
@@ -3232,39 +3216,31 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         if blur_px > 0 {
             self.apply_box_blur(
                 &mut shadow_data,
-                shadow_width as usize,
-                shadow_height as usize,
-                blur.get(),
+                source_shadow_width as usize,
+                source_shadow_height as usize,
+                blur.get() / shadow_downscale as f32,
             );
         }
-
-        // Apply shadow color to the blurred alpha
-        self.apply_shadow_color(&mut shadow_data, &color);
-
-        // Create texture args for the shadow
-        let shadow_buffer = SharedPixelBuffer::clone_from_slice(
-            &shadow_data,
-            shadow_width as u32,
-            shadow_height as u32,
-        );
-
-        let shadow_img = SharedImageBuffer::RGBA8Premultiplied(shadow_buffer);
 
         // Calculate shadow position (with offset)
         let shadow_x = physical_geom.min_x() + offset_x_px - blur_px;
         let shadow_y = physical_geom.min_y() + offset_y_px - blur_px;
+        let shadow_alpha = (color.alpha() as f32 * self.current_state.alpha).round() as u8;
 
         // Create texture args
         let texture_args = target_pixel_buffer::DrawTextureArgs {
             data: target_pixel_buffer::TextureDataContainer::Shared {
-                buffer: SharedBufferData::SharedImage(shadow_img),
+                buffer: SharedBufferData::AlphaMap {
+                    data: Rc::from(shadow_data),
+                    width: source_shadow_width as u16,
+                },
                 source_rect: PhysicalRect::new(
                     PhysicalPoint::new(0, 0),
-                    PhysicalSize::new(shadow_width, shadow_height),
+                    PhysicalSize::new(source_shadow_width, source_shadow_height),
                 ),
             },
-            colorize: None,
-            alpha: (self.current_state.alpha * 255.0) as u8,
+            colorize: Some(color),
+            alpha: shadow_alpha,
             dst_x: shadow_x as isize,
             dst_y: shadow_y as isize,
             dst_width: shadow_width as usize,
