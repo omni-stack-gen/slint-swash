@@ -11,9 +11,7 @@ use crate::properties::InterpolatedPropertyValue;
 use euclid::default::{Point2D, Size2D};
 
 #[cfg(not(feature = "std"))]
-use num_traits::Euclid;
-#[cfg(not(feature = "std"))]
-use num_traits::float::Float;
+use num_traits::Float;
 
 /// A brush is a data structure that is used to describe how
 /// a shape, such as a rectangle, path or even text, shall be filled.
@@ -367,7 +365,10 @@ impl ConicGradientBrush {
     /// The `from_angle` parameter is specified in degrees and rotates the entire gradient clockwise.
     fn apply_rotation(&mut self, from_angle: f32) {
         // Convert degrees to normalized 0-1 range
-        let normalized_from_angle = (from_angle / 360.0) - (from_angle / 360.0).floor();
+        let mut normalized_from_angle = (from_angle / 360.0) % 1.0;
+        if normalized_from_angle < 0.0 {
+            normalized_from_angle += 1.0;
+        }
 
         // If no rotation needed, just update the stored angle
         if normalized_from_angle.abs() < f32::EPSILON {
@@ -392,10 +393,10 @@ impl ConicGradientBrush {
         stops = stops
             .iter()
             .map(|stop| {
-                #[cfg(feature = "std")]
-                let rotated_position = (stop.position + normalized_from_angle).rem_euclid(1.0);
-                #[cfg(not(feature = "std"))]
-                let rotated_position = (stop.position + normalized_from_angle).rem_euclid(&1.0);
+                let mut rotated_position = stop.position + normalized_from_angle;
+                if rotated_position >= 1.0 {
+                    rotated_position -= 1.0;
+                }
                 GradientStop { position: rotated_position, color: stop.color }
             })
             .collect();
