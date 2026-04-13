@@ -3233,7 +3233,9 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         );
 
         // Apply Gaussian blur to the shadow
-        if blur_px > 0 {
+        // TODO: Temporarily disabled for performance optimization
+        const ENABLE_GAUSSIAN_BLUR: bool = false;
+        if ENABLE_GAUSSIAN_BLUR && blur_px > 0 {
             self.apply_gaussian_blur(
                 &mut shadow_data,
                 shadow_width as usize,
