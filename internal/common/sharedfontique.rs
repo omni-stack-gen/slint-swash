@@ -39,9 +39,13 @@ pub static COLLECTION: std::sync::LazyLock<Collection> = std::sync::LazyLock::ne
         }
     }
 
-    let mut add_font_from_path = |path: std::path::PathBuf| {
+    let mut add_font_from_path = |path: std::path::PathBuf| -> bool {
         if let Ok(bytes) = std::fs::read(&path) {
             let fonts = collection.register_fonts(bytes.into(), None);
+            if fonts.is_empty() {
+                return false;
+            }
+
             for generic_family in [
                 fontique::GenericFamily::SansSerif,
                 fontique::GenericFamily::SystemUi,
@@ -60,7 +64,11 @@ pub static COLLECTION: std::sync::LazyLock<Collection> = std::sync::LazyLock::ne
             }) {
                 default_fonts.insert(path, font);
             }
+
+            return true;
         }
+
+        false
     };
 
     if let Some(path) = std::env::var_os("SLINT_DEFAULT_FONT") {
@@ -72,6 +80,26 @@ pub static COLLECTION: std::sync::LazyLock<Collection> = std::sync::LazyLock::ne
                 if let Ok(file) = file {
                     add_font_from_path(file.path());
                 }
+            }
+        }
+    } else {
+        let font_paths: Vec<std::path::PathBuf> =
+            if let Some(paths) = std::env::var_os("SLINT_FONT_PATH") {
+                std::env::split_paths(&paths).collect()
+            } else {
+                [
+                    "/system/subset_font.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                ]
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect()
+            };
+
+        for path in font_paths {
+            if add_font_from_path(path) {
+                break;
             }
         }
     }
