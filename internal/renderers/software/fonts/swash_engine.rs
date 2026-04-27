@@ -28,8 +28,8 @@ pub struct AlphaMask {
     pub top: i32,
 }
 
-/// 缓存键：(字体ID, 字形ID, 像素大小)
-type CacheKey = (u64, u16, u32, u32);
+/// 缓存键：(字体ID, 字体索引, 字形ID, 像素大小, 字重)
+type CacheKey = (u64, u32, u16, u32, u32);
 
 /// Swash 光栅化引擎
 pub struct SwashEngine {
@@ -68,12 +68,13 @@ impl SwashEngine {
         &mut self,
         font_data: &[u8],
         font_id: u64,
+        font_index: u32,
         glyph_id: u16,
         size_px: f32,
         weight: i32,
     ) -> Option<AlphaMask> {
         let size_u32 = size_px.round() as u32;
-        let key: CacheKey = (font_id, glyph_id, size_u32, weight as u32);
+        let key: CacheKey = (font_id, font_index, glyph_id, size_u32, weight as u32);
 
         // 检查缓存
         if let Some(mask) = self.cache.get(&key) {
@@ -81,7 +82,7 @@ impl SwashEngine {
         }
 
         // 缓存未命中，执行光栅化
-        let mask = self.rasterize_glyph(font_data, glyph_id, size_px, weight)?;
+        let mask = self.rasterize_glyph(font_data, font_index, glyph_id, size_px, weight)?;
 
         // 存入缓存
         self.cache.put(key, mask.clone());
@@ -93,12 +94,13 @@ impl SwashEngine {
     fn rasterize_glyph(
         &mut self,
         font_data: &[u8],
+        font_index: u32,
         glyph_id: u16,
         size_px: f32,
         weight: i32,
     ) -> Option<AlphaMask> {
         // Swash 零拷贝解析字体
-        let font = FontRef::from_index(font_data, 0)?;
+        let font = FontRef::from_index(font_data, font_index as usize)?;
 
         // 构建缩放器（禁用 hinting 以获得更平滑的字体边缘）
         let mut scaler = self.context.builder(font).size(size_px).hint(false).build();
@@ -188,10 +190,11 @@ impl SwashEngine {
     pub fn glyph_metrics(
         &self,
         font_data: &[u8],
+        font_index: u32,
         glyph_id: u16,
         size_px: f32,
     ) -> Option<GlyphMetrics> {
-        let font = FontRef::from_index(font_data, 0)?;
+        let font = FontRef::from_index(font_data, font_index as usize)?;
 
         // 获取字体单位每 EM（units per em）用于缩放
         let units_per_em = font.metrics(&[]).units_per_em as f32;

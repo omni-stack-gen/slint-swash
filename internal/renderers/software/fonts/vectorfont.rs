@@ -132,6 +132,7 @@ impl VectorFont {
                     engine.get_or_rasterize(
                         self.font_blob.data(),
                         self.font_blob.id(),
+                        self.font_index,
                         glyph_id.get(),
                         self.pixel_size.get() as f32,
                         self.weight,
@@ -165,7 +166,12 @@ impl VectorFont {
     /// 获取字形度量（使用 Swash）
     fn get_glyph_metrics(&self, glyph_id: u16) -> Option<GlyphMetrics> {
         with_swash_engine(|engine| {
-            engine.glyph_metrics(self.font_blob.data(), glyph_id, self.pixel_size.get() as f32)
+            engine.glyph_metrics(
+                self.font_blob.data(),
+                self.font_index,
+                glyph_id,
+                self.pixel_size.get() as f32,
+            )
         })
     }
 }
