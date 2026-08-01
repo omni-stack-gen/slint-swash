@@ -60,6 +60,11 @@ where
     SWASH_ENGINE.with(|engine| f(&mut *engine.borrow_mut()))
 }
 
+pub(crate) fn clear_glyph_caches() {
+    GLYPH_CACHE.with(|cache| cache.borrow_mut().clear());
+    with_swash_engine(SwashEngine::clear_cache);
+}
+
 pub struct VectorFont {
     weight: i32,
     font_index: u32,

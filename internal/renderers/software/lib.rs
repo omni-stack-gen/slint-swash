@@ -500,6 +500,17 @@ impl SoftwareRenderer {
         self.repaint_buffer_type.get()
     }
 
+    /// Clear rasterized system-font glyphs retained by the current thread.
+    ///
+    /// Long-lived embedded shells can call this at a component-lifecycle
+    /// boundary to prevent glyphs from an exited application from occupying
+    /// the bounded caches alongside the next application. Registered fonts
+    /// and renderer configuration are preserved.
+    #[cfg(feature = "systemfonts")]
+    pub fn clear_font_caches(&self) {
+        fonts::vectorfont::clear_glyph_caches();
+    }
+
     /// Set how the window need to be rotated in the buffer.
     ///
     /// This is typically used to implement screen rotation in software
