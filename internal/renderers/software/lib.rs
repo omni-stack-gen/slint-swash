@@ -2117,6 +2117,9 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                 original_size,
                 ..
             }) => {
+                if size.is_empty() || original_size.is_empty() {
+                    return;
+                }
                 let adjust_x = size.width as f32 / original_size.width as f32;
                 let adjust_y = size.height as f32 / original_size.height as f32;
                 let source_to_target_x = source_to_target_x / adjust_x;
@@ -3559,5 +3562,113 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
 
             self.processor.process_target_texture(&t, physical_clip.cast());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use i_slint_core::graphics::{
+        FitResult, IntRect, Rgb8Pixel, StaticTexture, TexturePixelFormat,
+    };
+    use i_slint_core::slice::Slice;
+
+    static SINGLE_PIXEL_TEXTURE: [StaticTexture; 1] = [StaticTexture {
+        rect: IntRect::new(euclid::Point2D::new(0, 0), euclid::Size2D::new(1, 1)),
+        format: TexturePixelFormat::Rgba,
+        color: Color::from_argb_encoded(0),
+        index: 0,
+    }];
+    static TRANSPARENT_PIXEL: [u8; 4] = [0x12, 0x34, 0x56, 0];
+    static OPAQUE_RED_PIXEL: [u8; 4] = [0xff, 0, 0, 0xff];
+    static TRANSPARENT_TEXTURE: StaticTextures = StaticTextures {
+        size: i_slint_core::graphics::IntSize::new(1, 1),
+        original_size: i_slint_core::graphics::IntSize::new(1, 1),
+        data: Slice::from_slice(&TRANSPARENT_PIXEL),
+        textures: Slice::from_slice(&SINGLE_PIXEL_TEXTURE),
+    };
+    static OPAQUE_RED_TEXTURE: StaticTextures = StaticTextures {
+        size: i_slint_core::graphics::IntSize::new(1, 1),
+        original_size: i_slint_core::graphics::IntSize::new(1, 1),
+        data: Slice::from_slice(&OPAQUE_RED_PIXEL),
+        textures: Slice::from_slice(&SINGLE_PIXEL_TEXTURE),
+    };
+
+    fn render_static_texture(texture: &'static StaticTextures) -> Rgb8Pixel {
+        let initial_pixel = Rgb8Pixel::new(0x08, 0x10, 0x18);
+        let mut frame_buffer = [initial_pixel];
+        let mut target_buffer = TargetPixelSlice { data: &mut frame_buffer, pixel_stride: 1 };
+        let mut dirty_region = PhysicalRegion::default();
+        dirty_region.rectangles[0] =
+            euclid::Box2D::new(PhysicalPoint::new(0, 0), PhysicalPoint::new(1, 1));
+        dirty_region.count = 1;
+        let processor = RenderToBuffer {
+            buffer: &mut target_buffer,
+            dirty_range_cache: Vec::new(),
+            dirty_region,
+        };
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let mut renderer = SceneBuilder::new(
+            PhysicalSize::new(1, 1),
+            ScaleFactor::new(1.),
+            WindowInner::from_pub(window.window()),
+            processor,
+            RenderingRotation::NoRotation,
+        );
+        let image = ImageInner::StaticTextures(texture);
+        let fit = FitResult {
+            clip_rect: IntRect::new(Default::default(), [1, 1].into()),
+            source_to_target_x: 1.,
+            source_to_target_y: 1.,
+            size: euclid::Size2D::new(1., 1.),
+            offset: Default::default(),
+            tiled: None,
+        };
+
+        renderer.draw_image_impl(&image, fit, Color::default());
+        drop(renderer);
+
+        frame_buffer[0]
+    }
+
+    #[test]
+    fn non_zero_transparent_static_texture_leaves_framebuffer_unchanged() {
+        assert_eq!(render_static_texture(&TRANSPARENT_TEXTURE), Rgb8Pixel::new(0x08, 0x10, 0x18));
+    }
+
+    #[test]
+    fn non_zero_opaque_static_texture_updates_framebuffer() {
+        assert_eq!(render_static_texture(&OPAQUE_RED_TEXTURE), Rgb8Pixel::new(0xff, 0, 0));
+    }
+
+    #[test]
+    fn zero_sized_static_texture_is_ignored() {
+        static ZERO_SIZED_TEXTURE: StaticTextures = StaticTextures {
+            size: i_slint_core::graphics::IntSize::new(0, 0),
+            original_size: i_slint_core::graphics::IntSize::new(0, 0),
+            data: Slice::from_slice(&[]),
+            textures: Slice::from_slice(&[]),
+        };
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let mut renderer = SceneBuilder::new(
+            PhysicalSize::new(32, 32),
+            ScaleFactor::new(1.),
+            WindowInner::from_pub(window.window()),
+            PrepareScene::default(),
+            RenderingRotation::NoRotation,
+        );
+        let image = ImageInner::StaticTextures(&ZERO_SIZED_TEXTURE);
+        let fit = FitResult {
+            clip_rect: IntRect::new(Default::default(), [1, 1].into()),
+            source_to_target_x: 1.,
+            source_to_target_y: 1.,
+            size: euclid::Size2D::new(32., 32.),
+            offset: Default::default(),
+            tiled: None,
+        };
+
+        renderer.draw_image_impl(&image, fit, Color::default());
+
+        assert!(renderer.processor.items.is_empty());
     }
 }
