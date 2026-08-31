@@ -2117,6 +2117,9 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                 original_size,
                 ..
             }) => {
+                if size.is_empty() || original_size.is_empty() {
+                    return;
+                }
                 let adjust_x = size.width as f32 / original_size.width as f32;
                 let adjust_y = size.height as f32 / original_size.height as f32;
                 let source_to_target_x = source_to_target_x / adjust_x;
@@ -3559,5 +3562,43 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
 
             self.processor.process_target_texture(&t, physical_clip.cast());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use i_slint_core::graphics::{FitResult, IntRect};
+    use i_slint_core::slice::Slice;
+
+    #[test]
+    fn zero_sized_static_texture_is_ignored() {
+        static ZERO_SIZED_TEXTURE: StaticTextures = StaticTextures {
+            size: i_slint_core::graphics::IntSize::new(0, 0),
+            original_size: i_slint_core::graphics::IntSize::new(0, 0),
+            data: Slice::from_slice(&[]),
+            textures: Slice::from_slice(&[]),
+        };
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let mut renderer = SceneBuilder::new(
+            PhysicalSize::new(32, 32),
+            ScaleFactor::new(1.),
+            WindowInner::from_pub(window.window()),
+            PrepareScene::default(),
+            RenderingRotation::NoRotation,
+        );
+        let image = ImageInner::StaticTextures(&ZERO_SIZED_TEXTURE);
+        let fit = FitResult {
+            clip_rect: IntRect::new(Default::default(), [1, 1].into()),
+            source_to_target_x: 1.,
+            source_to_target_y: 1.,
+            size: euclid::Size2D::new(32., 32.),
+            offset: Default::default(),
+            tiled: None,
+        };
+
+        renderer.draw_image_impl(&image, fit, Color::default());
+
+        assert!(renderer.processor.items.is_empty());
     }
 }

@@ -34,10 +34,10 @@ pub struct Texture {
 
 #[cfg(feature = "software-renderer")]
 impl Texture {
-    pub fn new_empty() -> Self {
+    pub fn new_empty(total_size: Size, original_size: Size) -> Self {
         Self {
-            total_size: Size::default(),
-            original_size: Size::default(),
+            total_size,
+            original_size,
             rect: Rect::from_xywh(0, 0, 1, 1).unwrap(),
             data: vec![0, 0, 0, 0],
             format: PixelFormat::Rgba,

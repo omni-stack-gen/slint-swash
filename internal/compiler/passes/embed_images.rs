@@ -224,7 +224,10 @@ fn generate_texture(
         top += 1;
     }
     if top == image.height() {
-        return Texture::new_empty();
+        return Texture::new_empty(
+            Size { width: image.width(), height: image.height() },
+            original_size,
+        );
     }
     let mut bottom = image.height() - 1;
     while is_line_transparent(bottom) {
@@ -436,4 +439,22 @@ fn load_image(
             Size { width: original_width, height: original_height },
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fully_transparent_texture_keeps_image_dimensions() {
+        let image = image::RgbaImage::from_pixel(4, 3, image::Rgba([0x12, 0x34, 0x56, 0]));
+        let original_size = Size { width: 8, height: 6 };
+
+        let texture = generate_texture(image, SourceFormat::Rgba, original_size);
+
+        assert_eq!((texture.total_size.width, texture.total_size.height), (4, 3));
+        assert_eq!((texture.original_size.width, texture.original_size.height), (8, 6));
+        assert_eq!((texture.rect.width(), texture.rect.height()), (1, 1));
+        assert_eq!(texture.data, [0, 0, 0, 0]);
+    }
 }
