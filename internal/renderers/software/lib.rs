@@ -408,7 +408,7 @@ mod target_pixel_buffer;
 
 #[cfg(feature = "experimental")]
 pub use target_pixel_buffer::{
-    DrawRectangleArgs, DrawTextureArgs, TargetPixelBuffer, TexturePixelFormat,
+    DrawRectangleArgs, DrawTextureArgs, TargetPixelBuffer, TextureCacheKey, TexturePixelFormat,
 };
 
 #[cfg(not(feature = "experimental"))]
