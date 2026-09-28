@@ -1,0 +1,7 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: MIT
+
+## IDF Component Manager Manifest File
+dependencies:
+  idf: ">=5.3"
+  espressif/esp-box-3: "^3"

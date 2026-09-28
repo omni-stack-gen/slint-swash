@@ -1,0 +1,88 @@
+#!/bin/sh
+# Copyright © Klarälvdalens Datakonsult AB, a KDAB Group company, info@kdab.com, author David Faure <david.faure@kdab.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+set -eu
+unset CDPATH
+export RUSTFLAGS='-D warnings'
+# Qt widget tests open a real window unless told otherwise, which hangs
+# indefinitely on a machine with no display.
+export QT_QPA_PLATFORM=offscreen
+
+usage() {
+  echo "Usage: $0 <all|rust|cpp|interpreter|python|nodejs> [<filter>] [<cargo test args>...]" >&2
+}
+
+fatal() {
+  printf '%s\n' "$1" >&2
+  usage
+  exit 1
+}
+
+if [ "$#" -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+driver="$1"
+
+case "$driver" in
+  all|rust|cpp|interpreter|python|nodejs) ;;
+  *)
+    fatal "Invalid driver: $driver"
+    ;;
+esac
+
+shift
+filter=""
+if [ "$#" -ge 1 ]; then
+  filter="$1"
+  shift || true
+fi
+
+if [ "$driver" = "all" ]; then
+  drivers="rust cpp interpreter python nodejs"
+
+  for d in $drivers; do
+    echo "==> Building driver: $d" >&2
+    "$0" "$d" "$filter" --no-run "$@"
+  done
+
+  for d in $drivers; do
+    echo "==> Running tests for driver: $d" >&2
+    "$0" "$d" "$filter" "$@"
+  done
+  exit 0
+fi
+
+# For the rust driver, auto-detect the --test <category> from the filter to avoid
+# building all test binaries (which is very slow). We look for .slint files matching
+# the filter under tests/cases/ and extract the subdirectory name.
+test_bin_flag=""
+if [ "$driver" = "rust" ] && [ -n "$filter" ]; then
+  # Locate the cases/ directory relative to this script
+  cases_dir="$(cd "$(dirname "$0")/cases" && pwd)"
+  # Find which subdirectories contain matching .slint files
+  categories=$(find "$cases_dir" -name "*${filter}*" -name "*.slint" 2>/dev/null \
+    | sed "s|^${cases_dir}/||" | cut -d/ -f1 | sort -u)
+  num_categories=$(printf '%s\n' "$categories" | grep -c . || true)
+  if [ "$num_categories" -eq 1 ]; then
+    test_bin_flag="--test $categories"
+  fi
+fi
+
+# Match CI, which runs the whole tests workspace with --all-features. That matters:
+# - interpreter: `inject-debug-hooks` runs every test a second time with debug hooks
+#   injected, and that second run catches failures the plain run does not.
+# - rust: `build-time` (generate code rather than expand the macro; shows warnings and
+#   lets you read the generated code) and `deterministic-output` (compile each testcase
+#   twice and compare).
+# Note that --all-features therefore never exercises the `slint!` macro path; for that,
+# run the rust driver by hand without --all-features.
+features_flag="--all-features"
+
+# The integration tests are their own workspace; select it explicitly so the
+# script works regardless of the current directory.
+manifest="$(cd "$(dirname "$0")" && pwd)/Cargo.toml"
+
+SLINT_TEST_FILTER="$filter" cargo test --manifest-path "$manifest" -p "test-driver-$driver" $features_flag $test_bin_flag "$@"

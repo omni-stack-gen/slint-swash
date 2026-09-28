@@ -1,0 +1,706 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+use crate::editor_preview::{
+    self,
+    token_info::{TokenInfo, token_info},
+};
+use crate::util;
+use i_slint_compiler::expression_tree::Expression;
+use i_slint_compiler::langtype::ElementDocEntry;
+use i_slint_compiler::langtype::{BuiltinElement, ElementType, Type};
+use i_slint_compiler::object_tree::ElementRc;
+use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, SyntaxToken};
+use itertools::Itertools as _;
+use lsp_types::{Hover, HoverContents, MarkupContent};
+use std::rc::Rc;
+
+pub fn get_tooltip(
+    document_cache: &mut editor_preview::DocumentCache,
+    token: SyntaxToken,
+) -> Option<Hover> {
+    let token_info = token_info(document_cache, token.clone())?;
+    let documentation =
+        token_info.declaration(document_cache).and_then(|x| extract_documentation(&x));
+    let documentation = documentation.as_deref();
+    let contents = match token_info {
+        TokenInfo::Type(ty) => match ty {
+            Type::Enumeration(e) => from_slint_code(&format!("enum {}", e.name), documentation),
+            Type::Struct(s) if s.name.is_some() => {
+                from_slint_code(&format!("struct {}", s.name.slint_name().unwrap()), documentation)
+            }
+            _ => from_plain_text(ty.to_string()),
+        },
+        TokenInfo::ElementType(e) => match e {
+            ElementType::Component(c) => {
+                if c.is_global() {
+                    from_slint_code(&format!("global {}", c.id), documentation)
+                } else {
+                    from_slint_code(&format!("component {}", c.id), documentation)
+                }
+            }
+            ElementType::Builtin(b) => {
+                let raw = builtin_element_description(&b);
+                let cleaned = clean_builtin_doc(raw);
+                let doc = if cleaned.is_empty() { None } else { Some(cleaned.as_str()) };
+                if b.is_global {
+                    from_slint_code(&format!("global {}", b.name), doc)
+                } else {
+                    from_slint_code(&format!("component {} (builtin)", b.name), doc)
+                }
+            }
+            _ => return None,
+        },
+        TokenInfo::ElementRc(e) => {
+            let e = e.borrow();
+            let component = &e.enclosing_component.upgrade().unwrap();
+            if component.is_global() {
+                from_slint_code(&format!("global {}", component.id), documentation)
+            } else if e.id.is_empty() {
+                from_slint_code(&format!("{} {{ /*...*/ }}", e.base_type), documentation)
+            } else {
+                from_slint_code(
+                    &format!("{} := {} {{ /*...*/ }}", e.id, e.base_type),
+                    documentation,
+                )
+            }
+        }
+        TokenInfo::NamedReference(nr) => {
+            from_named_reference(&nr.element(), nr.name(), documentation)?
+        }
+        TokenInfo::EnumerationValue(v) => {
+            from_slint_code(&format!("{}.{}", v.enumeration.name, v), documentation)
+        }
+        TokenInfo::FileName(path) => MarkupContent {
+            kind: lsp_types::MarkupKind::Markdown,
+            value: format!("`{}`", path.to_string_lossy()),
+        },
+        TokenInfo::Image(path) => MarkupContent {
+            kind: lsp_types::MarkupKind::Markdown,
+            value: format!("![{0}]({0})", path.to_string_lossy()),
+        },
+        // Todo: this can happen when there is some syntax error
+        TokenInfo::LocalProperty(_) | TokenInfo::LocalCallback(_) | TokenInfo::LocalFunction(_) => {
+            return None;
+        }
+        TokenInfo::StructField(s, field) => {
+            from_slint_code(&format!("{field}: {}", s.fields.get(&field)?), documentation)
+        }
+        TokenInfo::ModelData(elem) => {
+            let ty = Expression::RepeaterModelReference { element: Rc::downgrade(&elem) }.ty();
+            let name = elem.borrow().repeated.as_ref()?.model_data_id.clone();
+            from_slint_code(&format!("{name}: {ty}"), documentation)
+        }
+        TokenInfo::IncompleteNamedReference(el, name) => {
+            from_property_in_type(&el, &name, documentation)?
+        }
+    };
+
+    Some(Hover {
+        contents: HoverContents::Markup(contents),
+        range: Some(util::token_to_lsp_range(&token, document_cache.format)),
+    })
+}
+
+// Given a token that declares something, find a comment before that token that could be a documentation for this
+fn extract_documentation(declaration: &SyntaxNode) -> Option<String> {
+    let mut token = declaration.first_token()?;
+    // Loop back to find the the previous line \n
+    loop {
+        if token.kind() == SyntaxKind::Whitespace {
+            let mut ln = token.text().bytes().filter(|c| *c == b'\n');
+            // One \n
+            if ln.next().is_some() {
+                // Two \n
+                if ln.next().is_some() {
+                    return None;
+                }
+                token = token.prev_token()?;
+                break;
+            }
+        }
+        token = token.prev_token()?;
+    }
+
+    // find the comment
+    let mut result = String::new();
+    while token.kind() == SyntaxKind::Comment {
+        let text = token.text().to_string();
+        token = if let Some(token) = token.prev_token() { token } else { break };
+        if token.kind() == SyntaxKind::Whitespace {
+            let mut ln = token.text().bytes().filter(|c| *c == b'\n');
+            // One \n
+            if ln.next().is_some() {
+                result = format!("{}{text}{result}", token.text());
+                // Two \n
+                if ln.next().is_some() {
+                    break;
+                }
+                token = if let Some(token) = token.prev_token() { token } else { break };
+                continue;
+            }
+        }
+        break;
+    }
+
+    if result.is_empty() {
+        return None;
+    }
+
+    // De-ident the comment
+    let indentation_size =
+        result.lines().filter_map(|x| x.find(|x| x != ' ' && x != '\t')).min()?;
+    let mut result2 = String::new();
+    for line in result.lines().skip_while(|p| p.trim().is_empty()) {
+        if line.len() > indentation_size {
+            result2.push_str(line[indentation_size..].trim_end());
+        }
+        result2.push('\n');
+    }
+    if result2.ends_with("\n\n") {
+        result2.pop(); // remove the last newline
+    }
+    Some(result2)
+}
+
+fn from_property_in_element(
+    element: &ElementRc,
+    name: &str,
+    documentation: Option<&str>,
+) -> Option<MarkupContent> {
+    let element = element.borrow();
+    if let Some((_, decl)) = element.declaration(name) {
+        return property_tooltip(
+            &decl.property_type,
+            name,
+            decl.pure.unwrap_or(false),
+            documentation,
+        );
+    }
+    from_property_in_type(&element.base_type, name, documentation)
+}
+
+/// Tooltip for a `NamedReference`, whose name is the member's storage key - a mangled internal name
+/// for a declaration that shadows an inherited member. The member is shown under its source name.
+fn from_named_reference(
+    element: &ElementRc,
+    key: &str,
+    documentation: Option<&str>,
+) -> Option<MarkupContent> {
+    let element = element.borrow();
+    if let Some(decl) = element.property_declarations.get(key) {
+        return property_tooltip(
+            &decl.property_type,
+            decl.shadowed_name.as_deref().unwrap_or(key),
+            decl.pure.unwrap_or(false),
+            documentation,
+        );
+    }
+    match &element.base_type {
+        ElementType::Component(c) => from_named_reference(&c.root_element, key, documentation),
+        other => from_property_in_type(other, key, documentation),
+    }
+}
+
+fn builtin_element_description(b: &BuiltinElement) -> &str {
+    b.docs
+        .iter()
+        .find_map(|e| match e {
+            ElementDocEntry::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .unwrap_or("")
+}
+
+/// Strip a trailing `\{#sls.…}` paragraph-id marker. Those identify normative
+/// paragraphs for the safety manual's traceability matrix and are meaningless
+/// in a tooltip. Mirrors `split_marker` in
+/// docs/slint-doc-generator/traceability.rs.
+fn strip_paragraph_id(line: &str) -> &str {
+    let Some(prefix) = line.trim_end().strip_suffix('}') else { return line };
+    let Some(start) = prefix.rfind("\\{#sls.") else { return line };
+    line[..start].trim_end()
+}
+
+/// Extract the prose description from a raw builtin element doc comment,
+/// stripping code fences, `\`-annotations, `\{#sls.…}` paragraph ids, and
+/// `<Component />` MDX tags that don't render well in a tooltip.
+fn clean_builtin_doc(raw: &str) -> String {
+    let mut result = String::new();
+    let mut in_fence = false;
+    let mut in_only_in_sc = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") || trimmed.starts_with(":::") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if trimmed.starts_with('\\') {
+            continue;
+        }
+        // `<OnlyInSC>` holds what only holds in Slint SC, so the tooltip drops
+        // it: it would tell a reader of the full language that something they
+        // can write is an error.
+        // TODO: once the LSP serves Slint SC development too, it should show
+        // this text there, and mark what `<NotInSC>` holds as unavailable.
+        if trimmed == "<OnlyInSC>" {
+            in_only_in_sc = true;
+            continue;
+        }
+        if trimmed == "</OnlyInSC>" {
+            in_only_in_sc = false;
+            continue;
+        }
+        if in_only_in_sc {
+            continue;
+        }
+        // A line that is nothing but a tag is markup for the documentation
+        // site, not prose. That covers `<Link … />` as well as the
+        // `<NotInSC>` … `</NotInSC>` pair marking what the safety-certified
+        // subset leaves out, whose text the tooltip keeps: it documents the
+        // full language.
+        if trimmed.starts_with('<') && trimmed.ends_with('>') && !trimmed[1..].contains('<') {
+            continue;
+        }
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(strip_paragraph_id(line));
+    }
+    // Trim trailing blank lines.
+    while result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+fn from_property_in_type(
+    base: &ElementType,
+    name: &str,
+    documentation: Option<&str>,
+) -> Option<MarkupContent> {
+    match base {
+        ElementType::Component(c) => from_property_in_element(&c.root_element, name, documentation),
+        ElementType::Builtin(b) => {
+            let resolved_name = b.native_class.lookup_alias(name).unwrap_or(name);
+            let info = b.properties.get(resolved_name)?;
+            let cleaned;
+            let builtin_doc = match &info.docs {
+                Some(raw) => {
+                    cleaned = clean_builtin_doc(raw);
+                    if cleaned.is_empty() { None } else { Some(cleaned.as_str()) }
+                }
+                None => None,
+            };
+            property_tooltip(&info.ty, name, false, documentation.or(builtin_doc))
+        }
+        _ => None,
+    }
+}
+
+fn property_tooltip(
+    ty: &Type,
+    name: &str,
+    pure: bool,
+    documentation: Option<&str>,
+) -> Option<MarkupContent> {
+    let pure = if pure { "pure " } else { "" };
+    if let Type::Callback(callback) = ty {
+        let sig = signature_from_function_ty(callback);
+        Some(from_slint_code(&format!("{pure}callback {name}{sig}"), documentation))
+    } else if let Type::Function(function) = &ty {
+        let sig = signature_from_function_ty(function);
+        Some(from_slint_code(&format!("{pure}function {name}{sig}"), documentation))
+    } else if ty.is_property_type() {
+        Some(from_slint_code(&format!("property <{ty}> {name}"), documentation))
+    } else {
+        None
+    }
+}
+
+fn signature_from_function_ty(f: &i_slint_compiler::langtype::Function) -> String {
+    let ret = if matches!(f.return_type, Type::Void) {
+        String::new()
+    } else {
+        format!(" -> {}", f.return_type)
+    };
+    let args = f
+        .args
+        .iter()
+        .zip(f.arg_names.iter().chain(std::iter::repeat(&Default::default())))
+        .filter(|(x, _)| *x != &Type::ElementReference)
+        .map(|(ty, name)| if !name.is_empty() { format!("{name}: {ty}") } else { ty.to_string() })
+        .join(", ");
+    format!("({args}){ret}")
+}
+
+fn from_plain_text(value: String) -> MarkupContent {
+    MarkupContent { kind: lsp_types::MarkupKind::PlainText, value }
+}
+
+/// Format a tooltip with a Slint code signature and optional documentation.
+/// User-written `//` comments go inside the code fence (they're valid Slint).
+/// Builtin docs (plain prose) go outside as markdown.
+fn from_slint_code(value: &str, documentation: Option<&str>) -> MarkupContent {
+    let doc = documentation.unwrap_or("");
+    let value = if doc.is_empty() {
+        format!("```slint\n{value}\n```")
+    } else if doc.starts_with("//") || doc.starts_with("/*") {
+        // User-written comment — keep inside the code fence.
+        let sep = if doc.ends_with('\n') { "" } else { "\n" };
+        format!("```slint\n{doc}{sep}{value}\n```")
+    } else {
+        // Builtin doc — render as markdown above the code fence.
+        format!("{doc}\n```slint\n{value}\n```")
+    };
+    MarkupContent { kind: lsp_types::MarkupKind::Markdown, value }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use i_slint_compiler::parser::TextSize;
+
+    #[test]
+    fn test_tooltip_struct_field_and_model_data() {
+        // #13305
+        let source = r#"
+struct InnerData {
+    /// docs for inner
+    inner: string,
+}
+struct Data { first: string, second: [InnerData] }
+export component AppWindow {
+    in property <Data> data;
+    Text { text: data.first + data.second[0].inner; }
+    for item in data.second: Text { text: item.inner; }
+}"#;
+        let (mut dc, uri, _) = crate::language::test::loaded_document_cache(source.into());
+        let doc = dc.get_document(&uri).unwrap().node.clone().unwrap();
+        let mut tooltip = |needle: &str, offset: u32| {
+            let offset = TextSize::new(source.find(needle).unwrap() as u32 + offset);
+            let token = crate::language::token_at_offset(&doc, offset).unwrap();
+            match get_tooltip(&mut dc, token).unwrap().contents {
+                HoverContents::Markup(m) => m.value,
+                x => panic!("Found {x:?}"),
+            }
+        };
+
+        assert_eq!(tooltip("data.first", 5), "```slint\nfirst: string\n```");
+        assert_eq!(
+            tooltip("data.second[0].inner", 15),
+            "```slint\n/// docs for inner\ninner: string\n```"
+        );
+        assert_eq!(tooltip("item.inner", 0), "```slint\nitem: InnerData\n```");
+        assert_eq!(tooltip("item.inner", 5), "```slint\n/// docs for inner\ninner: string\n```");
+    }
+
+    #[test]
+    fn test_tooltip() {
+        let source = r#"
+import { StandardTableView } from "std-widgets.slint";
+
+/// Docs for
+/// the Glob global
+global Glob {
+  in-out property <{a:int,b:float}> hello_world;
+  // not docs
+
+  callback cb(string, int) -> [int];
+  /** The fn_glob function */
+  public pure
+  function fn_glob(abc: int) {}
+}
+
+/// TA is a component
+component TA inherits TouchArea { // not docs
+  in property <string> hello; // not docs
+  /** Docs for
+   * the xyz callback
+   */
+  callback xyz(string, int);
+  /*not docs */ pure callback www;
+}
+/// Here some docs for Eee
+enum Eee { E1, E2, E3 }
+export component Test { // not docs
+  // root-prop is a property
+  property <string> root-prop;
+  function fn_loc() -> int { 42 }
+  the-ta := TA {
+      property<int> local-prop: root-prop.to-float();
+      hello: Glob.hello_world.a;
+      xyz(abc, def) => {
+         self.www();
+         self.enabled = false;
+         Glob.fn_glob(local-prop);
+         Glob.cb("xxx", 45);
+         root.fn_loc();
+      }
+      property <Eee> e: Eee.E2;
+      pointer-event(aaa) => {}
+  }
+  Rectangle {
+    background: red;
+    border-color: self.background;
+  }
+  StandardTableView {
+    row-pointer-event => { }
+  }
+  Image {
+      source: @image-url("assets/unix-test.png");
+  }
+  Image {
+      source: @image-url("assets\\windows-test.png");
+  }
+}"#;
+        let (mut dc, uri, _) = crate::language::test::loaded_document_cache(source.into());
+        let doc = dc.get_document(&uri).unwrap().node.clone().unwrap();
+
+        let find_tk = |needle: &str, offset: TextSize| {
+            crate::language::token_at_offset(
+                &doc,
+                TextSize::new(
+                    source.find(needle).unwrap_or_else(|| panic!("'{needle}' not found")) as u32,
+                ) + offset,
+            )
+            .unwrap()
+        };
+
+        #[track_caller]
+        fn assert_tooltip(h: Option<Hover>, str: &str) {
+            match h.unwrap().contents {
+                HoverContents::Markup(m) => assert_eq!(m.value, str),
+                x => panic!("Found {x:?} ({str})"),
+            }
+        }
+
+        #[track_caller]
+        fn assert_tooltip_contains(h: Option<Hover>, expected: &str) {
+            match h.unwrap().contents {
+                HoverContents::Markup(m) => assert!(
+                    m.value.contains(expected),
+                    "expected tooltip to contain {expected:?} but got {:?}",
+                    m.value
+                ),
+                x => panic!("Found {x:?} ({expected})"),
+            }
+        }
+
+        // properties
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("hello: Glob", 0.into())),
+            "```slint\nproperty <string> hello\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("Glob.hello_world", 8.into())),
+            "```slint\nproperty <{ a: int,b: float,}> hello-world\n```",
+        );
+        // builtin property: signature + doc from the builtin element declaration
+        let enabled_tip = get_tooltip(&mut dc, find_tk("self.enabled", 5.into()));
+        assert_tooltip_contains(enabled_tip.clone(), "property <bool> enabled");
+        assert_tooltip_contains(enabled_tip, "TouchArea"); // doc mentions TouchArea
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("fn_glob(local-prop)", 10.into())),
+            "```slint\nproperty <int> local-prop\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("root-prop.to-float", 1.into())),
+            "```slint\n// root-prop is a property\nproperty <string> root-prop\n```",
+        );
+        // builtin property: signature + doc from the builtin element declaration
+        let bg_tip = get_tooltip(&mut dc, find_tk("background: red", 0.into()));
+        assert_tooltip_contains(bg_tip.clone(), "```slint\nproperty <brush> background\n```");
+        assert_tooltip_contains(bg_tip, "background brush"); // doc text
+        // callbacks
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("self.www", 5.into())),
+            "```slint\npure callback www()\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("xyz(abc", 0.into())),
+            "```slint\n/** Docs for\n * the xyz callback\n */\ncallback xyz(string, int)\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("Glob.cb(", 6.into())),
+            "```slint\ncallback cb(string, int) -> [int]\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("row-pointer-event", 0.into())),
+            "```slint\ncallback row-pointer-event(row: int, event: PointerEvent, position: Point)\n```",
+        );
+        assert_tooltip_contains(
+            get_tooltip(&mut dc, find_tk("pointer-event", 5.into())),
+            "```slint\ncallback pointer-event(event: PointerEvent)\n```",
+        );
+        // functions
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("fn_glob(local-prop)", 1.into())),
+            "```slint\n/** The fn_glob function */\npure function fn-glob(abc: int)\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("root.fn_loc", 8.into())),
+            "```slint\nfunction fn-loc() -> int\n```",
+        );
+        // elements
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("self.enabled", 0.into())),
+            "```slint\nthe-ta := TA { /*...*/ }\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("self.background", 0.into())),
+            "```slint\nRectangle { /*...*/ }\n```",
+        );
+        // global
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("hello: Glob", 8.into())),
+            "```slint\n/// Docs for\n/// the Glob global\nglobal Glob\n```",
+        );
+
+        //components
+        assert_tooltip_contains(
+            get_tooltip(&mut dc, find_tk("Rectangle {", 8.into())),
+            "component Rectangle (builtin)",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("the-ta := TA {", 11.into())),
+            "```slint\n/// TA is a component\ncomponent TA\n```",
+        );
+
+        // @image-url
+        let target_path = uri
+            .join("assets/unix-test.png")
+            .unwrap()
+            .to_file_path()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("\"assets/unix-test.png\"", 15.into())),
+            &format!("![{target_path}]({target_path})"),
+        );
+
+        // @image-url
+        let target_path = uri
+            .join("assets/windows-test.png")
+            .unwrap()
+            .to_file_path()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("\"assets\\\\windows-test.png\"", 15.into())),
+            &format!("![{target_path}]({target_path})"),
+        );
+
+        // enums
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("Eee.E2", 0.into())),
+            "```slint\n/// Here some docs for Eee\nenum Eee\n```",
+        );
+        // FIXME: We get the comments for the enum instead of the value
+        assert_tooltip(
+            get_tooltip(&mut dc, find_tk("Eee.E2", 5.into())),
+            "```slint\n/// Here some docs for Eee\nEee.E2\n```",
+        );
+    }
+
+    #[test]
+    fn test_tooltip_expected_type() {
+        // A bare enum value resolved through the expected type (the comparison's rhs) hovers
+        // as that enum value.
+        let source = r#"
+enum Direction { up, down, forward }
+export component Test {
+    in property <Direction> dir;
+    out property <bool> b: dir == forward;
+}"#;
+        let (mut dc, uri, _) = crate::language::test::loaded_document_cache(source.into());
+        let doc = dc.get_document(&uri).unwrap().node.clone().unwrap();
+        let offset = TextSize::new(source.find("dir == forward").unwrap() as u32 + 7);
+        let token = crate::language::token_at_offset(&doc, offset).unwrap();
+        assert_eq!(token.text(), "forward");
+        match get_tooltip(&mut dc, token).unwrap().contents {
+            HoverContents::Markup(m) => {
+                assert!(m.value.contains("Direction.forward"), "got {:?}", m.value)
+            }
+            x => panic!("Found {x:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tooltip_shadowed_member() {
+        // `Derived` shadows the `@shadowable` `prop` of `Base`, with a different type. The tooltip
+        // for a use must describe the property declared in the same component, under its source name.
+        let source = r#"
+component Base {
+    @shadowable in-out property <int> prop;
+    out property <int> base-out: self.prop;
+}
+component Derived inherits Base {
+    in-out property <string> prop;
+    out property <string> derived-out: self.prop;
+}
+export component Test {
+    Derived { }
+}"#;
+        let (mut dc, uri, _) =
+            crate::language::test::loaded_document_cache_with_experimental(source.into());
+        let doc = dc.get_document(&uri).unwrap().node.clone().unwrap();
+
+        let find_prop = |anchor: &str| {
+            let anchor_pos = source.find(anchor).unwrap();
+            let prop_pos = anchor_pos + source[anchor_pos..].find("self.prop").unwrap() + 5;
+            crate::language::token_at_offset(&doc, TextSize::new(prop_pos as u32)).unwrap()
+        };
+
+        #[track_caller]
+        fn assert_tooltip(h: Option<Hover>, str: &str) {
+            match h.unwrap().contents {
+                HoverContents::Markup(m) => assert_eq!(m.value, str),
+                x => panic!("Found {x:?} ({str})"),
+            }
+        }
+
+        assert_tooltip(
+            get_tooltip(&mut dc, find_prop("base-out: self.prop")),
+            "```slint\nproperty <int> prop\n```",
+        );
+        assert_tooltip(
+            get_tooltip(&mut dc, find_prop("derived-out: self.prop")),
+            "```slint\nproperty <string> prop\n```",
+        );
+    }
+
+    #[test]
+    fn test_clean_builtin_doc() {
+        // What only holds in Slint SC is left out: the tooltip documents the
+        // full language, where the window size is the file's to set.
+        assert_eq!(
+            clean_builtin_doc(
+                "The width of the window. \\{#sls.ref.window.width}\n\
+                 \n\
+                 <OnlyInSC>\n\
+                 Binding it is an error. \\{#sls.ref.window.width-out}\n\
+                 </OnlyInSC>\n\
+                 \\sc"
+            ),
+            "The width of the window."
+        );
+        // What the subset leaves out is kept, tags aside
+        assert_eq!(
+            clean_builtin_doc(
+                "A rectangle.\n\
+                 \n\
+                 <NotInSC>\n\
+                 Its width defaults to that of its parent.\n\
+                 </NotInSC>"
+            ),
+            "A rectangle.\n\nIts width defaults to that of its parent."
+        );
+    }
+}

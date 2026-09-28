@@ -1,0 +1,85 @@
+---
+title: ScrollView
+description: ScrollView API.
+---
+
+import CodeSnippetMD from '@slint/common-files/src/components/CodeSnippetMD.astro';
+import SlintProperty from '@slint/common-files/src/components/SlintProperty.astro';
+
+<CodeSnippetMD imagePath="" noScreenShot scale="3" imageWidth="300" imageHeight="200" imageAlt="">
+```slint
+import { ScrollView } from "@material";
+export component Example inherits Window {
+    width: 300px;
+    height: 200px;
+    background: transparent;
+    ScrollView {
+        width: 280px;
+        height: 180px;
+    }
+}
+```
+</CodeSnippetMD>
+
+A `ScrollView` provides scrolling functionality for content that exceeds the available space, with optional scroll bars.
+
+## Properties
+
+### enabled
+<SlintProperty propName="enabled" typeName="bool" defaultValue="true">
+Whether scrolling is enabled.
+</SlintProperty>
+
+### has-focus
+<SlintProperty propName="has-focus" typeName="bool" propertyVisibility="in-out">
+Whether the scroll view has focus.
+</SlintProperty>
+
+### horizontal-scrollbar-policy
+<SlintProperty propName="horizontal-scrollbar-policy" typeName="enum" enumName="ScrollBarPolicy">
+The policy for showing the horizontal scroll bar.
+</SlintProperty>
+
+### vertical-scrollbar-policy
+<SlintProperty propName="vertical-scrollbar-policy" typeName="enum" enumName="ScrollBarPolicy">
+The policy for showing the vertical scroll bar.
+</SlintProperty>
+
+### content-height
+<SlintProperty propName="content-height" typeName="length" propertyVisibility="in-out">
+The total height of the scrollable content.
+This property was formerly known as `viewport-height`, which is still available as an alias.
+</SlintProperty>
+
+### content-width
+<SlintProperty propName="content-width" typeName="length" propertyVisibility="in-out">
+The total width of the scrollable content.
+This property was formerly known as `viewport-width`, which is still available as an alias.
+</SlintProperty>
+
+### content-x
+<SlintProperty propName="content-x" typeName="length" propertyVisibility="in-out">
+The horizontal scroll position.
+This property was formerly known as `viewport-x`, which is still available as an alias.
+</SlintProperty>
+
+### content-y
+<SlintProperty propName="content-y" typeName="length" propertyVisibility="in-out">
+The vertical scroll position.
+This property was formerly known as `viewport-y`, which is still available as an alias.
+</SlintProperty>
+
+### visible-height
+<SlintProperty propName="visible-height" typeName="length" propertyVisibility="out">
+The height of the visible area.
+</SlintProperty>
+
+### visible-width
+<SlintProperty propName="visible-width" typeName="length" propertyVisibility="out">
+The width of the visible area.
+</SlintProperty>
+
+## Callbacks
+
+### scrolled()
+Invoked when the content is scrolled.

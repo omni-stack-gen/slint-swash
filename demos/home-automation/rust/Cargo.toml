@@ -1,0 +1,32 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "home-automation"
+version = "1.18.1"
+authors = ["Slint Developers <info@slint.dev>"]
+edition.workspace = true
+publish = false
+license = "MIT"
+
+[[bin]]
+path = "main.rs"
+name = "home-automation"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+path = "lib.rs"
+name = "home_automation_lib"
+
+[dependencies]
+slint = { path = "../../../api/rs/slint", default-features = false, features = ["compat-1-18", "std", "backend-android-activity-06"] }
+chrono = "0.4"
+
+[features]
+default = ["slint/default"]
+sw-renderer = []
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2" }
+web-sys = { version = "0.3", features = ["console"] }
+console_error_panic_hook = "0.1.5"

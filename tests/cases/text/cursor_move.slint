@@ -1,0 +1,205 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+export component TestCase inherits TextInput {
+    width: 100phx;
+    height: 100phx;
+    in-out property<string> test_text: self.text;
+    in-out property<int> test_cursor_pos: self.cursor_position_byte_offset;
+    in-out property<int> test_anchor_pos: self.anchor_position_byte_offset;
+    in-out property<bool> has_selection: self.test_cursor_pos != self.test_anchor_pos;
+    in-out property<bool> input_focused: self.has_focus;
+}
+
+/*
+```rust
+use slint::platform::Key;
+use slint::SharedString;
+
+fn press(instance: &TestCase, key: Key, times: usize) {
+    for _ in 0..times {
+        slint_testing::send_keyboard_string_sequence(instance, &SharedString::from(key));
+    }
+}
+
+fn send_move_mod_modifier(instance: &TestCase, pressed: bool) {
+    let modifier = if cfg!(target_os = "macos") { Key::Alt } else { Key::Control };
+    slint_testing::send_keyboard_char(instance, modifier.into(), pressed);
+}
+
+fn send_move_mod_shift_modifier(instance: &TestCase, pressed: bool) {
+    slint_testing::send_keyboard_char(instance, Key::Shift.into(), pressed);
+    send_move_mod_modifier(instance, pressed);
+}
+
+let instance = TestCase::new().unwrap();
+slint_testing::send_mouse_click(&instance, 50., 50.);
+assert!(instance.get_input_focused());
+assert_eq!(instance.get_test_text(), "");
+slint_testing::send_keyboard_string_sequence(&instance, "Test");
+assert_eq!(instance.get_test_text(), "Test");
+assert!(!instance.get_has_selection());
+
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), true);
+press(&instance, Key::LeftArrow, 1);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), false);
+assert!(instance.get_has_selection());
+press(&instance, Key::Backspace, 1);
+assert!(!instance.get_has_selection());
+press(&instance, Key::Backspace, 1);
+
+assert_eq!(instance.get_test_text(), "Te");
+
+press(&instance, Key::RightArrow, 4);
+assert_eq!(instance.get_test_cursor_pos(), 2);
+
+press(&instance, Key::LeftArrow, 4);
+assert_eq!(instance.get_test_cursor_pos(), 0);
+
+send_move_mod_shift_modifier(&instance, true);
+press(&instance, Key::DownArrow, 1);
+send_move_mod_shift_modifier(&instance, false);
+assert!(instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 2);
+assert_eq!(instance.get_test_anchor_pos(), 0);
+
+press(&instance, Key::RightArrow, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 2);
+assert_eq!(instance.get_test_anchor_pos(), 2);
+
+send_move_mod_shift_modifier(&instance, true);
+press(&instance, Key::UpArrow, 1);
+send_move_mod_shift_modifier(&instance, false);
+assert!(instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 0);
+assert_eq!(instance.get_test_anchor_pos(), 2);
+
+// Select all and start over
+slint_testing::send_keyboard_char(&instance, Key::Control.into(), true);
+slint_testing::send_keyboard_string_sequence(&instance, "a");
+slint_testing::send_keyboard_char(&instance, Key::Control.into(), false);
+press(&instance, Key::Backspace, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_text(), "");
+
+slint_testing::send_keyboard_string_sequence(&instance, "abcdefghi");
+assert_eq!(instance.get_test_text(), "abcdefghi");
+press(&instance, Key::LeftArrow, 3);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), true);
+press(&instance, Key::LeftArrow, 2);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), false);
+assert!(instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 4);
+assert_eq!(instance.get_test_anchor_pos(), 6);
+
+press(&instance, Key::RightArrow, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 6);
+
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), true);
+press(&instance, Key::LeftArrow, 2);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), false);
+assert!(instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 4);
+assert_eq!(instance.get_test_anchor_pos(), 6);
+
+press(&instance, Key::LeftArrow, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 4);
+
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), true);
+press(&instance, Key::RightArrow, 2);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), false);
+assert!(instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 6);
+assert_eq!(instance.get_test_anchor_pos(), 4);
+
+press(&instance, Key::LeftArrow, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 4);
+
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), true);
+press(&instance, Key::RightArrow, 2);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), false);
+assert!(instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 6);
+assert_eq!(instance.get_test_anchor_pos(), 4);
+
+press(&instance, Key::RightArrow, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_cursor_pos(), 6);
+
+// Select all and start over
+slint_testing::send_keyboard_char(&instance, Key::Control.into(), true);
+slint_testing::send_keyboard_string_sequence(&instance, "a");
+slint_testing::send_keyboard_char(&instance, Key::Control.into(), false);
+press(&instance, Key::Backspace, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_text(), "");
+
+slint_testing::send_keyboard_string_sequence(&instance, "First Word Third Word Fifth");
+assert_eq!(instance.get_test_text(), "First Word Third Word Fifth");
+press(&instance, Key::LeftArrow, 5);
+assert_eq!(instance.get_test_cursor_pos(), 22);
+
+// Delete word backwards when the cursor is between the 'F' of Fifth and the leading space.
+// -> Delete "Word"
+send_move_mod_modifier(&instance, true);
+press(&instance, Key::Backspace, 1);
+send_move_mod_modifier(&instance, false);
+assert_eq!(instance.get_test_text(), "First Word Third Fifth");
+
+// Once more :-)
+send_move_mod_modifier(&instance, true);
+press(&instance, Key::Backspace, 1);
+send_move_mod_modifier(&instance, false);
+assert_eq!(instance.get_test_text(), "First Word Fifth");
+
+// Move cursor between the "d" of "Word" and the trailing space
+press(&instance, Key::LeftArrow, 6);
+
+// Delete word forwards
+send_move_mod_modifier(&instance, true);
+press(&instance, Key::Delete, 1);
+send_move_mod_modifier(&instance, false);
+assert_eq!(instance.get_test_text(), "First Fifth");
+
+// Select all and start over
+slint_testing::send_keyboard_char(&instance, Key::Control.into(), true);
+slint_testing::send_keyboard_string_sequence(&instance, "a");
+slint_testing::send_keyboard_char(&instance, Key::Control.into(), false);
+press(&instance, Key::Backspace, 1);
+assert!(!instance.get_has_selection());
+assert_eq!(instance.get_test_text(), "");
+
+slint_testing::send_keyboard_string_sequence(&instance, "First Second");
+assert_eq!(instance.get_test_text(), "First Second");
+
+press(&instance, Key::LeftArrow, 2);
+
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), true);
+press(&instance, Key::LeftArrow, 2);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), false);
+assert!(instance.get_has_selection());
+
+// When there's an existing selection, always just delete that
+send_move_mod_modifier(&instance, true);
+press(&instance, Key::Backspace, 1);
+send_move_mod_modifier(&instance, false);
+assert_eq!(instance.get_test_text(), "First Send");
+
+press(&instance, Key::LeftArrow, 5);
+
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), true);
+press(&instance, Key::LeftArrow, 1);
+slint_testing::send_keyboard_char(&instance, Key::Shift.into(), false);
+assert!(instance.get_has_selection());
+
+// When there's an existing selection, always just delete that
+send_move_mod_modifier(&instance, true);
+press(&instance, Key::Delete, 1);
+send_move_mod_modifier(&instance, false);
+assert_eq!(instance.get_test_text(), "Fist Send");
+```
+*/

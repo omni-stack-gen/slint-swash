@@ -1,0 +1,58 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+name: Issue Triage
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  # The issue templates apply `need triaging` themselves, but the REST API ignores
+  # templates, so an issue filed through it never reaches the triage filter.
+  # So apply the issue via Github Actions automatically if it is missing.
+  # Slint Team Members are exempt from this rule.
+  add_need_triaging:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.issue.user.type != 'Bot' &&
+      !contains(fromJson('["OWNER", "MEMBER"]'), github.event.issue.author_association) &&
+      !contains(github.event.issue.labels.*.name, 'need triaging')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Add the need triaging label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/labels -f labels[]='need triaging'
+
+  update_labels:
+    if: github.event_name == 'issue_comment'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check whether we should update the tags
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          has_needs_info=$(echo '${{ toJson(github.event.issue.labels.*.name) }}' | jq 'contains(["needs info"])')
+
+          is_author="${{ github.event.comment.user.login == github.event.issue.user.login }}"
+
+          echo "has_needs_info=$has_needs_info" >> $GITHUB_OUTPUT
+          echo "is_author=$is_author" >> $GITHUB_OUTPUT
+
+      - name: Update labels
+        if: steps.check.outputs.has_needs_info == 'true' && steps.check.outputs.is_author == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method DELETE -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/labels/needs%20info
+          gh api --method POST -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/labels -f labels[]='need triaging'

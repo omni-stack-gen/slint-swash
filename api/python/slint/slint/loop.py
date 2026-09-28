@@ -1,0 +1,285 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+import asyncio
+import asyncio.events
+import asyncio.selector_events
+import datetime
+import selectors
+import typing
+from collections.abc import Mapping
+
+from ._native import native
+
+
+class HasFileno(typing.Protocol):
+    def fileno(self) -> int: ...
+
+
+def fd_for_fileobj(fileobj: int | HasFileno) -> int:
+    if isinstance(fileobj, int):
+        return fileobj
+    return int(fileobj.fileno())
+
+
+class _SlintSelectorMapping(Mapping[typing.Any, selectors.SelectorKey]):
+    def __init__(self, slint_selector: "_SlintSelector") -> None:
+        self.slint_selector = slint_selector
+
+    def __len__(self) -> int:
+        return len(self.slint_selector.fd_to_selector_key)
+
+    def get(self, fileobj, default=None):
+        fd = fd_for_fileobj(fileobj)
+        return self.slint_selector.fd_to_selector_key.get(fd, default)
+
+    def __getitem__(self, fileobj: typing.Any) -> selectors.SelectorKey:
+        fd = fd_for_fileobj(fileobj)
+        return self.slint_selector.fd_to_selector_key[fd]
+
+    def __iter__(self):
+        return iter(self.slint_selector.fd_to_selector_key)
+
+
+class _SlintSelector(selectors.BaseSelector):
+    def __init__(self) -> None:
+        self.fd_to_selector_key: dict[typing.Any, selectors.SelectorKey] = {}
+        self.mapping = _SlintSelectorMapping(self)
+        self.adapters: dict[int, native.AsyncAdapter] = {}
+
+    def register(
+        self, fileobj: typing.Any, events: typing.Any, data: typing.Any = None
+    ) -> selectors.SelectorKey:
+        fd = fd_for_fileobj(fileobj)
+        key = selectors.SelectorKey(fileobj, fd, events, data)
+        self.fd_to_selector_key[fd] = key
+
+        adapter = native.AsyncAdapter(fd)
+        self.adapters[fd] = adapter
+
+        if events & selectors.EVENT_READ:
+            adapter.wait_for_readable(self.read_notify)
+        if events & selectors.EVENT_WRITE:
+            adapter.wait_for_writable(self.write_notify)
+
+        return key
+
+    def unregister(self, fileobj: typing.Any) -> selectors.SelectorKey:
+        fd = fd_for_fileobj(fileobj)
+        key = self.fd_to_selector_key.pop(fd)
+
+        try:
+            del self.adapters[fd]
+        except KeyError:
+            pass
+
+        return key
+
+    def modify(
+        self, fileobj: typing.Any, events: int, data: typing.Any = None
+    ) -> selectors.SelectorKey:
+        fd = fd_for_fileobj(fileobj)
+        key = self.fd_to_selector_key[fd]
+
+        if key.events != events:
+            self.unregister(fileobj)
+            key = self.register(fileobj, events, data)
+        elif key.data != data:
+            key._replace(data=data)
+            self.fd_to_selector_key[fd] = key
+
+        return key
+
+    def select(
+        self, timeout: float | None = None
+    ) -> list[tuple[selectors.SelectorKey, int]]:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
+
+    def get_map(self) -> Mapping[int | HasFileno, selectors.SelectorKey]:
+        return self.mapping
+
+    def read_notify(self, fd: int) -> None:
+        key = self.fd_to_selector_key[fd]
+        (reader, _writer) = key.data
+        reader._run()
+
+    def write_notify(self, fd: int) -> None:
+        key = self.fd_to_selector_key[fd]
+        (_reader, writer) = key.data
+        writer._run()
+
+
+class _SlintTimerHandle(asyncio.TimerHandle):
+    """A `TimerHandle` that disarms the native timer backing it when cancelled.
+
+    `asyncio.TimerHandle.cancel()` only marks the handle. The native timer would stay
+    armed until its original deadline, wake the event loop just to find the handle dead,
+    and keep itself and its callback alive until then - for `call_later(3600, ...)`,
+    an hour.
+    """
+
+    __slots__ = ("_slint_key", "_slint_timers")
+
+    def __init__(
+        self,
+        when: float,
+        callback: typing.Callable[..., typing.Any],
+        args: typing.Sequence[typing.Any],
+        loop: asyncio.AbstractEventLoop,
+        context: typing.Any,
+        timers: dict[int, native.Timer],
+        key: int,
+    ) -> None:
+        super().__init__(when, callback, args, loop, context)
+        self._slint_timers = timers
+        self._slint_key = key
+
+    def cancel(self) -> None:
+        super().cancel()
+        timer = self._slint_timers.pop(self._slint_key, None)
+        if timer is not None:
+            timer.stop()
+
+
+class SlintEventLoop(asyncio.SelectorEventLoop):
+    def __init__(self) -> None:
+        self._is_running = False
+        self._timers: dict[int, native.Timer] = {}
+        self._timer_serial = 0
+        self.stop_run_forever_event = asyncio.Event()
+        self._soon_tasks: list[asyncio.TimerHandle] = []
+        super().__init__(_SlintSelector())
+
+    def run_forever(self) -> None:
+        async def loop_stopper(event: asyncio.Event) -> None:
+            await event.wait()
+            native.quit_event_loop()
+
+        asyncio.events._set_running_loop(self)
+        self._is_running = True
+        try:
+            self.stop_run_forever_event = asyncio.Event()
+            self.create_task(loop_stopper(self.stop_run_forever_event))
+            native.run_event_loop()
+        finally:
+            self._is_running = False
+            asyncio.events._set_running_loop(None)
+
+    def run_until_complete[T](self, future: typing.Awaitable[T]) -> T | None:
+        def stop_loop(future: typing.Any) -> None:
+            self.stop()
+
+        future = asyncio.ensure_future(future, loop=self)
+        future.add_done_callback(stop_loop)
+
+        try:
+            self.run_forever()
+        finally:
+            future.remove_done_callback(stop_loop)
+
+        if future.done():
+            return future.result()
+        else:
+            if self.stop_run_forever_event.is_set():
+                raise RuntimeError("run_until_complete's future isn't done", future)
+            else:
+                # If the loop was quit for example because the user closed the last window, then
+                # don't thrown an error but return a None sentinel. The return value of asyncio.run()
+                # isn't used by slint.run_event_loop() anyway
+                # TODO: see if we can properly cancel the future by calling cancel() and throwing
+                # the task cancellation exception.
+                return None
+
+    def _run_forever_setup(self) -> None:
+        pass
+
+    def _run_forever_cleanup(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        self.stop_run_forever_event.set()
+
+    def is_running(self) -> bool:
+        return self._is_running
+
+    def call_later(self, delay, callback, *args, context=None) -> asyncio.TimerHandle:
+        timer = native.Timer()
+
+        timers = self._timers
+        self._timer_serial += 1
+        key = self._timer_serial
+
+        handle = _SlintTimerHandle(
+            when=self.time() + delay,
+            callback=callback,
+            args=args,
+            loop=self,
+            context=context,
+            timers=timers,
+            key=key,
+        )
+
+        # The callback below must key into `timers` rather than capture `timer`: capturing
+        # it makes the timer and its callback keep each other alive. `Timer.__traverse__`
+        # makes that cycle collectable, but only by a full GC pass, and this runs on every
+        # await. Keyed by a serial, so a freed timer's key can never alias a live one.
+        def timer_done_cb() -> None:
+            timers.pop(key, None)
+            if not handle._cancelled:
+                handle._run()
+
+        timer.start(
+            native.TimerMode.SingleShot,
+            interval=datetime.timedelta(seconds=delay),
+            callback=timer_done_cb,
+        )
+
+        timers[key] = timer
+
+        return handle
+
+    def call_at(self, when, callback, *args, context=None) -> asyncio.TimerHandle:
+        return self.call_later(when - self.time(), callback, *args, context=context)
+
+    def call_soon(self, callback, *args, context=None) -> asyncio.TimerHandle:
+        # Collect call-soon tasks in a separate list to ensure FIFO order, as there's no guarantee
+        # that multiple single-shot timers in Slint are run in order.
+        handle = asyncio.TimerHandle(
+            when=self.time(), callback=callback, args=args, loop=self, context=context
+        )
+        self._soon_tasks.append(handle)
+        self.call_later(0, self._flush_soon_tasks)
+        return handle
+
+    def _flush_soon_tasks(self) -> None:
+        tasks_now = self._soon_tasks
+        self._soon_tasks = []
+        for handle in tasks_now:
+            if not handle._cancelled:
+                handle._run()
+
+    def call_soon_threadsafe(self, callback, *args, context=None) -> asyncio.Handle:
+        handle = asyncio.Handle(
+            callback=callback,
+            args=args,
+            loop=self,
+            context=context,
+        )
+
+        def run_handle_cb() -> None:
+            if not handle._cancelled:
+                handle._run()
+
+        native.invoke_from_event_loop(run_handle_cb)
+        return handle
+
+    def _add_callback_signalsafe(self, handle: asyncio.Handle) -> None:
+        # Signal handlers are dispatched by asyncio via this method after the
+        # self-pipe wakeup byte is read. The base implementation appends to
+        # `_ready`, which only the default asyncio run loop drains; slint's
+        # native loop does not, so route through our own scheduler instead.
+        if not handle._cancelled:
+            self.call_soon(handle._run)
