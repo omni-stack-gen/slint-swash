@@ -70,7 +70,7 @@ fn register_font_path_once(
         return Ok(());
     }
     register(path)?;
-    registered.insert(path.to_owned());
+    registered.insert(std::path::PathBuf::from(path));
     Ok(())
 }
 
