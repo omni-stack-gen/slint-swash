@@ -155,6 +155,15 @@ impl ImageCache {
     }
 }
 
+/// Drop decoded images retained by the current UI thread.
+///
+/// Component instances own any images that remain in active use, so clearing
+/// this bounded lookup cache at an application-lifecycle boundary does not
+/// invalidate a live component. A later lookup decodes the image again.
+pub(crate) fn clear() {
+    IMAGE_CACHE.with(|global_cache| global_cache.borrow_mut().0.clear());
+}
+
 fn dynamic_image_to_shared_image_buffer(dynamic_image: image::DynamicImage) -> SharedImageBuffer {
     if dynamic_image.color().has_alpha() {
         let rgba8image = dynamic_image.to_rgba8();
@@ -185,6 +194,20 @@ pub fn replace_cached_image(key: ImageCacheKey, value: ImageInner) {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use crate::graphics::Rgba8Pixel;
+
+    #[test]
+    fn decoded_image_cache_can_be_released_at_a_lifecycle_boundary() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cached.png");
+        image::RgbImage::from_pixel(10, 10, image::Rgb([1, 2, 3])).save(&path).unwrap();
+
+        let image = crate::graphics::Image::load_from_path(&path).unwrap();
+        super::IMAGE_CACHE.with(|cache| assert_eq!(cache.borrow().0.len(), 1));
+        drop(image);
+
+        super::clear();
+        super::IMAGE_CACHE.with(|cache| assert!(cache.borrow().0.is_empty()));
+    }
 
     #[test]
     fn test_path_cache_invalidation() {

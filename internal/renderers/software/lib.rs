@@ -511,6 +511,15 @@ impl SoftwareRenderer {
         fonts::vectorfont::clear_glyph_caches();
     }
 
+    /// Clear decoded images retained by the current UI thread.
+    ///
+    /// Embedded shells with one long-lived renderer can call this after an
+    /// application component is destroyed. Images still owned by another live
+    /// component remain valid; a later lookup decodes an evicted image again.
+    pub fn clear_image_caches(&self) {
+        i_slint_core::graphics::clear_image_cache();
+    }
+
     /// Set how the window need to be rotated in the buffer.
     ///
     /// This is typically used to implement screen rotation in software

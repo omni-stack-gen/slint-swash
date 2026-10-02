@@ -705,6 +705,15 @@ impl std::error::Error for LoadImageError {}
 #[derive(Default, Clone, Debug, PartialEq, derive_more::From)]
 pub struct Image(pub(crate) ImageInner);
 
+/// Drop decoded images retained by the current UI thread.
+///
+/// Renderer backends use this at a component-lifecycle boundary after the
+/// exiting component has released its image handles.
+#[doc(hidden)]
+pub fn clear_image_cache() {
+    self::cache::clear();
+}
+
 impl Image {
     #[cfg(feature = "image-decoders")]
     /// Load an Image from a path to a file containing an image.
