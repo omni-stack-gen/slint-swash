@@ -767,6 +767,7 @@ fn dynamic_image_to_shared_image_buffer(dynamic_image: image::DynamicImage) -> S
 impl PartialEq for ImageInner {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::None, Self::None) => true,
             (
                 Self::EmbeddedImage { cache_key: l_cache_key, buffer: l_buffer },
                 Self::EmbeddedImage { cache_key: r_cache_key, buffer: r_buffer },
