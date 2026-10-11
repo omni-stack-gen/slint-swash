@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use i_slint_common::sharedfontique::{self, fontique};
 use i_slint_core::lengths::ScaleFactor;
@@ -38,7 +39,28 @@ pub fn fallbackfont(font_request: &super::FontRequest, scale_factor: ScaleFactor
 }
 
 pub fn register_font_from_memory(data: &'static [u8]) -> Result<(), Box<dyn std::error::Error>> {
-    sharedfontique::get_collection().register_fonts(data.to_vec().into(), None);
+    static REGISTERED_MEMORY_FONTS: std::sync::OnceLock<std::sync::Mutex<Vec<&'static [u8]>>> =
+        std::sync::OnceLock::new();
+    register_memory_font_once(data, REGISTERED_MEMORY_FONTS.get_or_init(Default::default), |data| {
+        sharedfontique::get_collection().register_fonts(data.to_vec().into(), None);
+        Ok(())
+    })
+}
+
+fn register_memory_font_once(
+    data: &'static [u8],
+    registered: &std::sync::Mutex<Vec<&'static [u8]>>,
+    register: impl FnOnce(&'static [u8]) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut registered = registered.lock().unwrap_or_else(|poison| poison.into_inner());
+    // AOT hosts can share one content-addressed static across components. Use
+    // that zero-copy fast path first; fall back to exact bytes for independent
+    // generated components that embed the same font at different addresses.
+    if registered.iter().any(|known| std::ptr::eq::<[u8]>(*known, data) || *known == data) {
+        return Ok(());
+    }
+    register(data)?;
+    registered.push(data);
     Ok(())
 }
 
@@ -78,6 +100,37 @@ fn register_font_path_once(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn memory_font_is_registered_once_by_content_and_failures_are_retryable() {
+        static FIRST_COPY: &[u8] = b"same-font";
+        static SECOND_COPY: &[u8] = b"same-font";
+        static OTHER_FONT: &[u8] = b"other-font";
+        static RETRY_FONT: &[u8] = b"retry-font";
+
+        let registered = Default::default();
+        let calls = AtomicUsize::new(0);
+        for data in [FIRST_COPY, SECOND_COPY, OTHER_FONT] {
+            register_memory_font_once(data, &registered, |_| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+        assert!(register_memory_font_once(RETRY_FONT, &registered, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err(std::io::Error::other("temporary registration failure").into())
+        })
+        .is_err());
+        register_memory_font_once(RETRY_FONT, &registered, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+    }
 
     #[test]
     fn font_path_is_registered_once_and_failures_are_retryable() {
