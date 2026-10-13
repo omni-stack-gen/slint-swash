@@ -145,11 +145,23 @@ impl<T> ItemCache<T> {
     }
 
     /// Keeps only the entries for which `f` returns true.
+    /// Evicted entries invalidate bindings that depend on their cached values.
     pub fn retain(&self, mut f: impl FnMut(&T) -> bool) {
+        let mut evicted_trackers = alloc::vec::Vec::new();
         self.map.borrow_mut().retain(|_, per_component| {
-            per_component.retain(|_, entry| f(&entry.data));
+            per_component.retain(|_, entry| {
+                let keep = f(&entry.data);
+                if !keep && let Some(tracker) = entry.dependency_tracker.take() {
+                    evicted_trackers.push(tracker);
+                }
+                keep
+            });
             !per_component.is_empty()
         });
+        // Dirty handlers can re-enter this cache.
+        for tracker in evicted_trackers {
+            tracker.mark_dependents_dirty();
+        }
     }
 
     /// Returns a [`RefMut`](std::cell::RefMut) referencing the cached value associated with
@@ -809,4 +821,33 @@ where
 pub trait ItemRendererFeatures {
     /// The renderer supports applying 2D transformations to items.
     const SUPPORTS_TRANSFORMATIONS: bool;
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn item_cache_eviction_invalidates_dependents() {
+    use crate::properties::{Property, PropertyTracker};
+
+    for keep in [true, false] {
+        let cache = ItemCache::<i32>::default();
+        let value = Box::pin(Property::new(7));
+        let dependent = Box::pin(PropertyTracker::<false, _>::new_with_dirty_handler(|| {
+            assert!(cache.map.try_borrow_mut().is_ok());
+        }));
+        dependent.as_ref().evaluate(|| {
+            cache
+                .map
+                .borrow_mut()
+                .entry(core::ptr::null())
+                .or_default()
+                .insert(0, crate::graphics::CachedGraphicsData::new(|| value.as_ref().get()));
+        });
+        assert!(!dependent.is_dirty());
+        cache.retain(|_| keep);
+        assert_eq!(dependent.is_dirty(), !keep);
+        if keep {
+            value.as_ref().set(8);
+            assert!(dependent.is_dirty());
+        }
+    }
 }
