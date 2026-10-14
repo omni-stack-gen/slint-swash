@@ -1892,16 +1892,38 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
     }
 
     fn process_texture_impl(&mut self, geometry: PhysicalRect, texture: SceneTexture<'_>) {
-        self.foreach_ranges(&geometry, |line, buffer, extra_left_clip, extra_right_clip| {
-            draw_functions::draw_texture_line(
-                &geometry,
-                PhysicalLength::new(line),
-                &texture,
-                buffer,
-                extra_left_clip,
-                extra_right_clip,
-            );
-        });
+        let tiled = texture.extra.rotation.is_transpose()
+            && texture.format.bpp() >= 3
+            && geometry.size.width >= 64
+            && geometry.size.height >= 64;
+        let mut draw_region = |region: PhysicalRect| {
+            self.foreach_ranges(&region, |line, buffer, left, right| {
+                draw_functions::draw_texture_line(
+                    &geometry,
+                    PhysicalLength::new(line),
+                    &texture,
+                    buffer,
+                    left + (region.min_x() - geometry.min_x()),
+                    right + (geometry.max_x() - region.max_x()),
+                );
+            });
+        };
+        if tiled {
+            // Rotated scanlines read source columns. Tiles keep adjacent source
+            // columns in cache without changing sampling or blending.
+            for y in (geometry.min_y()..geometry.max_y()).step_by(32) {
+                for x in (geometry.min_x()..geometry.max_x()).step_by(32) {
+                    draw_region(euclid::rect(
+                        x,
+                        y,
+                        32.min(geometry.max_x() - x),
+                        32.min(geometry.max_y() - y),
+                    ));
+                }
+            }
+        } else {
+            draw_region(geometry);
+        }
     }
 }
 
@@ -3424,3 +3446,6 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
         }
     }
 }
+
+#[cfg(test)]
+mod texture_tiles_tests;
