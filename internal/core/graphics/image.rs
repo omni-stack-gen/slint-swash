@@ -554,7 +554,8 @@ impl ImageInner {
         match self {
             ImageInner::EmbeddedImage { buffer, .. } => Some(buffer.clone()),
             #[cfg(feature = "svg")]
-            ImageInner::Svg(svg) => match svg.render(_target_size_for_scalable_source) {
+            ImageInner::Svg(svg) => match svg::render_cached(svg, _target_size_for_scalable_source)
+            {
                 Ok(b) => Some(b),
                 // Ignore error when rendering a 0x0 image, that's just an empty image
                 Err(resvg::usvg::Error::InvalidSize) => None,
