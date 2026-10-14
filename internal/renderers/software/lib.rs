@@ -2397,8 +2397,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
 
             ImageInner::NineSlice(..) => unreachable!(),
             _ => {
-                let target_rect =
-                    euclid::Rect::new(offset, fit_size).round().cast().transformed(self.rotation);
+                let unrotated_target = euclid::Rect::new(offset, fit_size).round().cast();
+                let target_rect = unrotated_target.transformed(self.rotation);
                 let Some(clipped_target) = physical_clip.intersection(&target_rect) else {
                     return;
                 };
@@ -2409,7 +2409,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         .round()
                         .cast()
                 } else {
-                    target_rect.size.cast()
+                    unrotated_target.size.cast()
                 };
                 if let Some(buffer) = image_inner.render_to_buffer(Some(svg_target_size)) {
                     let buf_size = buffer.size().cast::<f32>();
