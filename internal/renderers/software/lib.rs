@@ -1255,9 +1255,12 @@ impl RendererSealed for SoftwareRenderer {
         let mut premul = SharedPixelBuffer::<PremultipliedRgbaColor>::new(size.width, size.height);
 
         let old_repaint_buffer_type = self.repaint_buffer_type();
+        // Snapshots use window coordinates, independent of panel rotation.
+        let old_rotation = self.rotation.replace(RenderingRotation::NoRotation);
         // ensure that caches are clear
         self.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
         self.render(premul.make_mut_slice(), size.width as usize);
+        self.rotation.set(old_rotation);
         self.set_repaint_buffer_type(old_repaint_buffer_type);
 
         let mut target_buffer_with_alpha =
