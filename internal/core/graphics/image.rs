@@ -817,6 +817,7 @@ pub struct Image(pub(crate) ImageInner);
 /// exiting component has released its image handles.
 #[doc(hidden)]
 pub fn clear_image_cache() {
+    #[cfg(any(feature = "image-decoders", all(target_arch = "wasm32", feature = "std")))]
     self::cache::clear();
 }
 
