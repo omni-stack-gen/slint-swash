@@ -71,6 +71,10 @@ i_slint_core::thread_local!(static GLYPH_CACHE: core::cell::RefCell<GlyphCache> 
     )
 );
 
+pub(crate) fn clear_glyph_caches() {
+    GLYPH_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
 pub struct VectorFont {
     font_index: u32,
     font_blob: fontique::Blob<u8>,
