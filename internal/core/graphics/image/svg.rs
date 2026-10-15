@@ -143,7 +143,6 @@ pub(super) fn render_cached(
         if bytes > RASTER_CACHE_BYTES {
             return;
         }
-        // Retain one size per source, with both a byte budget and an entry bound.
         while cache.len() >= RASTER_CACHE_ENTRIES
             || cache.iter().map(|entry| entry.bytes).sum::<usize>() + bytes > RASTER_CACHE_BYTES
         {
