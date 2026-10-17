@@ -3664,12 +3664,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         Expression::ArrayIndex { .. } => compile_array_index(expr, ctx),
         Expression::CodeBlock(..) => compile_code_block(expr, ctx),
         Expression::PropertyAssignment { property, value } => {
-            // Property::set consumes an owned value. A local variable may still be
-            // referenced by a later expression in the same Slint code block, so
-            // preserve it here just as callback/function arguments and binary
-            // operands do. This is observable for non-Copy values such as
-            // SharedString and avoids generating a Rust use-after-move.
-            let value = compile_expression_to_value(value, ctx);
+            let value = compile_expression(value, ctx);
             property_set_value_tokens(property, value, ctx)
         }
         Expression::ModelDataAssignment { .. } => compile_model_data_assignment(expr, ctx),
@@ -3701,7 +3696,11 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::ReadLocalVariable { name, .. } => {
             let name = ident(name);
-            quote!(#name)
+            // A local can flow through an owned compound expression (for example
+            // an if expression passed to model_set_row_data) and still be read
+            // later in the same Slint code block. Cloning at the read preserves
+            // the source-language value semantics across all owned sinks.
+            quote!(#name.clone())
         }
         Expression::MouseCursor(cursor) => match cursor {
             llr::MouseCursorInner::BuiltIn(expression) => {
