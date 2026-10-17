@@ -3696,7 +3696,11 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::ReadLocalVariable { name, .. } => {
             let name = ident(name);
-            quote!(#name)
+            // A local can flow through an owned compound expression (for example
+            // an if expression passed to model_set_row_data) and still be read
+            // later in the same Slint code block. Cloning at the read preserves
+            // the source-language value semantics across all owned sinks.
+            quote!(#name.clone())
         }
         Expression::MouseCursor(cursor) => match cursor {
             llr::MouseCursorInner::BuiltIn(expression) => {

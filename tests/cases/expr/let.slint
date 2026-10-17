@@ -12,6 +12,8 @@ enum TestEnum {
 }
 
 export component TestCase inherits Rectangle {
+    in-out property <string> captured-string;
+
     // test to make sure this compiles (local variable overlapping global name)
     background: {
         let blue: brush = red;
@@ -53,6 +55,12 @@ export component TestCase inherits Rectangle {
         return a == TestEnum.b ? 1 : 0;
     }
 
+    public function test_local_string_after_property_assignment() -> bool {
+        let value = "hello";
+        self.captured-string = value;
+        return value == "hello" && self.captured-string == "hello";
+    }
+
     // this is just a test to make sure it compiles with codeblock simplification
     // previously this would break if a let statement was the final expression in a block
     public pure function test_lone_let_in_block() {
@@ -72,6 +80,7 @@ assert_eq!(instance.invoke_test_type_annotation(), 1);
 assert_eq!(instance.invoke_test_type_annotation_conversion(), 1);
 assert_eq!(instance.invoke_test_struct_conversion(), 2);
 assert_eq!(instance.invoke_test_enum(), 1);
+assert!(instance.invoke_test_local_string_after_property_assignment());
 assert!(instance.get_test_background());
 ```
 
@@ -83,6 +92,7 @@ assert_eq(instance.invoke_test_type_annotation(), 1);
 assert_eq(instance.invoke_test_type_annotation_conversion(), 1);
 assert_eq(instance.invoke_test_struct_conversion(), 2);
 assert_eq(instance.invoke_test_enum(), 1);
+assert(instance.invoke_test_local_string_after_property_assignment());
 assert(instance.get_test_background());
 ```
 */

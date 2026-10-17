@@ -47,7 +47,24 @@ impl FontContext {
     pub fn register_static_font(&mut self, data: &'static [u8]) {
         let key = (data.as_ptr() as usize, data.len());
         if self.registered_static_fonts.insert(key) {
-            self.inner.collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
+            let families =
+                self.inner.collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
+
+            // A software-renderer target may have no discoverable system fonts (for example an
+            // embedded Linux image without fontconfig data). Fonts imported by the compiled
+            // Slint document must then also form the generic fallback chain; merely registering
+            // their named family leaves text without an explicit `font-family` unresolved.
+            // Append rather than replace so a platform's configured generic families retain
+            // precedence when they exist.
+            for generic_family in [
+                fontique::GenericFamily::SansSerif,
+                fontique::GenericFamily::SystemUi,
+                fontique::GenericFamily::UiSansSerif,
+            ] {
+                self.inner
+                    .collection
+                    .append_generic_families(generic_family, families.iter().map(|(id, _)| *id));
+            }
         }
     }
 

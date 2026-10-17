@@ -33,6 +33,24 @@ fn test_font_context() -> parley::FontContext {
     font_ctx
 }
 
+#[test]
+fn registered_static_font_is_a_generic_fallback_without_system_fonts() {
+    let mut font_ctx = FontContext::new(parley::FontContext {
+        collection: fontique::Collection::new(fontique::CollectionOptions {
+            system_fonts: false,
+            ..Default::default()
+        }),
+        source_cache: Default::default(),
+    });
+    let data = include_bytes!("../../../common/sharedfontique/Inter-VariableFont.ttf");
+
+    font_ctx.register_static_font(data);
+
+    let request = crate::graphics::FontRequest::default();
+    let parley::FontContext { collection, source_cache } = &mut font_ctx.inner;
+    assert!(request.query_fontique(collection, source_cache).is_some());
+}
+
 fn layout_text_with_builder(
     text: &str,
     builder: super::shaping::LayoutWithoutLineBreaksBuilder,
