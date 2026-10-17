@@ -20,8 +20,8 @@ categories = ["gui", "development-tools", "no-std"]
 path = "lib.rs"
 
 [features]
-# Rust-only NX5 validation; excluded from ordinary pixel storage and C bindings.
-unstable-external-pixel-buffer = ["std"]
+# Rust-only external storage; excluded from ordinary pixel storage and C bindings.
+external-pixel-buffer = ["std"]
 ffi = ["dep:static_assertions", "i-slint-core-macros/ffi"] # Expose C ABI
 libm = ["num-traits/libm", "euclid/libm"]
 # Allow the viewer to query at runtime information about item types
