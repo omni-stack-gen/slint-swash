@@ -309,6 +309,9 @@ impl SharedImageBuffer {
 
 impl PartialEq for SharedImageBuffer {
     fn eq(&self, other: &Self) -> bool {
+        if self.size() != other.size() {
+            return false;
+        }
         match self {
             Self::RGB8(lhs_buffer) => {
                 matches!(other, Self::RGB8(rhs_buffer) if lhs_buffer.as_slice().as_ptr().eq(&rhs_buffer.as_slice().as_ptr()))
