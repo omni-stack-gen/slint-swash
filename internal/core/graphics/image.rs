@@ -60,7 +60,7 @@ OpaqueImageVTable_static! {
 ///
 /// See the documentation for [`Image`] for examples how to use this type to integrate
 /// Slint with external rendering functions.
-#[cfg(not(feature = "unstable-external-pixel-buffer"))]
+#[cfg(not(feature = "external-pixel-buffer"))]
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct SharedPixelBuffer<Pixel> {
@@ -73,7 +73,7 @@ pub struct SharedPixelBuffer<Pixel> {
 /// Cloning retains the storage; mutable access first makes an owned copy.
 ///
 /// cbindgen:ignore
-#[cfg(feature = "unstable-external-pixel-buffer")]
+#[cfg(feature = "external-pixel-buffer")]
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct SharedPixelBuffer<Pixel> {
@@ -83,14 +83,14 @@ pub struct SharedPixelBuffer<Pixel> {
     external: Option<alloc::sync::Arc<ExternalPixels<Pixel>>>,
 }
 
-#[cfg(feature = "unstable-external-pixel-buffer")]
+#[cfg(feature = "external-pixel-buffer")]
 struct ExternalPixels<Pixel> {
     pointer: *const Pixel,
     length: usize,
     _owner: alloc::sync::Arc<dyn Send + Sync>,
 }
 
-#[cfg(feature = "unstable-external-pixel-buffer")]
+#[cfg(feature = "external-pixel-buffer")]
 impl<Pixel> core::fmt::Debug for ExternalPixels<Pixel> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExternalPixels").field("length", &self.length).finish_non_exhaustive()
@@ -98,9 +98,9 @@ impl<Pixel> core::fmt::Debug for ExternalPixels<Pixel> {
 }
 
 // SAFETY: from_external() requires immutable storage valid until the owner drops.
-#[cfg(feature = "unstable-external-pixel-buffer")]
+#[cfg(feature = "external-pixel-buffer")]
 unsafe impl<Pixel: Send + Sync> Send for ExternalPixels<Pixel> {}
-#[cfg(feature = "unstable-external-pixel-buffer")]
+#[cfg(feature = "external-pixel-buffer")]
 unsafe impl<Pixel: Send + Sync> Sync for ExternalPixels<Pixel> {}
 
 impl<Pixel> SharedPixelBuffer<Pixel> {
@@ -111,7 +111,7 @@ impl<Pixel> SharedPixelBuffer<Pixel> {
     /// `pointer` must be aligned, non-null, and valid for `width * height` initialized pixels.
     /// The pixels must remain immutable and readable on every thread until `owner` is dropped.
     /// Their total byte length must not exceed `isize::MAX`.
-    #[cfg(feature = "unstable-external-pixel-buffer")]
+    #[cfg(feature = "external-pixel-buffer")]
     pub unsafe fn from_external(
         pointer: *const Pixel,
         width: u32,
@@ -156,7 +156,7 @@ impl<Pixel> SharedPixelBuffer<Pixel> {
 impl<Pixel: Clone> SharedPixelBuffer<Pixel> {
     /// Return a mutable slice to the pixel data. If the SharedPixelBuffer was shared, this will make a copy of the buffer.
     pub fn make_mut_slice(&mut self) -> &mut [Pixel] {
-        #[cfg(feature = "unstable-external-pixel-buffer")]
+        #[cfg(feature = "external-pixel-buffer")]
         if let Some(external) = self.external.as_ref() {
             // SAFETY: from_external() establishes the storage lifetime and length.
             self.data =
@@ -187,7 +187,7 @@ where
 impl<Pixel> SharedPixelBuffer<Pixel> {
     /// Return a slice to the pixel data.
     pub fn as_slice(&self) -> &[Pixel] {
-        #[cfg(feature = "unstable-external-pixel-buffer")]
+        #[cfg(feature = "external-pixel-buffer")]
         if let Some(external) = &self.external {
             // SAFETY: from_external() establishes the storage lifetime and length.
             return unsafe { core::slice::from_raw_parts(external.pointer, external.length) };
@@ -203,7 +203,7 @@ impl<Pixel: Clone + Default> SharedPixelBuffer<Pixel> {
         Self {
             width,
             height,
-            #[cfg(feature = "unstable-external-pixel-buffer")]
+            #[cfg(feature = "external-pixel-buffer")]
             external: None,
             data: core::iter::repeat_n(Pixel::default(), width as usize * height as usize)
                 .collect(),
@@ -239,7 +239,7 @@ impl<Pixel: Clone> SharedPixelBuffer<Pixel> {
             width,
             height,
             data,
-            #[cfg(feature = "unstable-external-pixel-buffer")]
+            #[cfg(feature = "external-pixel-buffer")]
             external: None,
         }
     }
@@ -743,7 +743,7 @@ fn dynamic_image_to_shared_image_buffer(dynamic_image: image::DynamicImage) -> S
         SharedImageBuffer::RGBA8Premultiplied(SharedPixelBuffer {
             width: rgba8image.width(),
             height: rgba8image.height(),
-            #[cfg(feature = "unstable-external-pixel-buffer")]
+            #[cfg(feature = "external-pixel-buffer")]
             external: None,
             data: rgba8image
                 .as_pixels()
@@ -981,7 +981,7 @@ impl Image {
             SharedImageBuffer::RGB8(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                #[cfg(feature = "unstable-external-pixel-buffer")]
+                #[cfg(feature = "external-pixel-buffer")]
                 external: None,
                 data: buffer.as_slice().iter().copied().map(Into::into).collect(),
             },
@@ -989,7 +989,7 @@ impl Image {
             SharedImageBuffer::RGBA8Premultiplied(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                #[cfg(feature = "unstable-external-pixel-buffer")]
+                #[cfg(feature = "external-pixel-buffer")]
                 external: None,
                 data: buffer
                     .as_slice()
@@ -1009,14 +1009,14 @@ impl Image {
             SharedImageBuffer::RGB8(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                #[cfg(feature = "unstable-external-pixel-buffer")]
+                #[cfg(feature = "external-pixel-buffer")]
                 external: None,
                 data: buffer.as_slice().iter().copied().map(Into::into).collect(),
             },
             SharedImageBuffer::RGBA8(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                #[cfg(feature = "unstable-external-pixel-buffer")]
+                #[cfg(feature = "external-pixel-buffer")]
                 external: None,
                 data: buffer
                     .as_slice()

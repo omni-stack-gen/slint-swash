@@ -13,8 +13,8 @@
 #![no_std]
 #![debugger_visualizer(gdb_script_file = "gdb_pretty_printers.py")]
 
-#[cfg(all(feature = "unstable-external-pixel-buffer", feature = "ffi"))]
-compile_error!("unstable-external-pixel-buffer is Rust-only and cannot be combined with ffi");
+#[cfg(all(feature = "external-pixel-buffer", feature = "ffi"))]
+compile_error!("external-pixel-buffer is Rust-only and cannot be combined with ffi");
 
 extern crate alloc;
 #[cfg(feature = "std")]
