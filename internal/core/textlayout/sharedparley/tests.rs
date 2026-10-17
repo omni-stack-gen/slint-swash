@@ -47,7 +47,8 @@ fn registered_static_font_is_a_generic_fallback_without_system_fonts() {
     font_ctx.register_static_font(data);
 
     let request = crate::graphics::FontRequest::default();
-    assert!(request.query_fontique(&mut font_ctx.collection, &mut font_ctx.source_cache).is_some());
+    let parley::FontContext { collection, source_cache } = &mut font_ctx.inner;
+    assert!(request.query_fontique(collection, source_cache).is_some());
 }
 
 fn layout_text_with_builder(
