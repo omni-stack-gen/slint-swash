@@ -19,6 +19,8 @@ categories = ["gui", "rendering::engine", "no-std"]
 path = "lib.rs"
 
 [features]
+## Rust-only immutable external pixel storage for NX5 validation.
+unstable-external-pixel-buffer = ["std", "i-slint-core/unstable-external-pixel-buffer"]
 
 default = [
   "std",
