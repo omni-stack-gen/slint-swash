@@ -246,11 +246,16 @@ pub(super) fn draw_texture_line(
                         pix.blend(c);
                     }
                 } else if alpha == 0xff {
-                    TargetPixel::blend_sampled_slice(line_buffer, || {
+                    for pix in line_buffer {
                         let pos = pos(4).0;
-                        let p = &data[pos..pos + 4];
-                        PremultipliedRgbaColor { red: p[0], green: p[1], blue: p[2], alpha: p[3] }
-                    });
+                        let c = PremultipliedRgbaColor {
+                            alpha: data[pos + 3],
+                            red: data[pos + 0],
+                            green: data[pos + 1],
+                            blue: data[pos + 2],
+                        };
+                        pix.blend(c);
+                    }
                 } else {
                     for pix in line_buffer {
                         let pos = pos(4).0;
@@ -844,16 +849,6 @@ pub trait TargetPixel: Sized + Copy {
             }
         }
     }
-    /// Blend one sampled color into each pixel.
-    /// The sampler is called once per pixel, in slice order.
-    fn blend_sampled_slice(
-        pixels: &mut [Self],
-        mut sample: impl FnMut() -> PremultipliedRgbaColor,
-    ) {
-        for pixel in pixels {
-            pixel.blend(sample());
-        }
-    }
     /// Create a pixel from the red, gree, blue component in the range 0..=255
     fn from_rgb(red: u8, green: u8, blue: u8) -> Self;
 
@@ -884,36 +879,6 @@ impl TargetPixel for PremultipliedRgbaColor {
         self.blue = (self.blue as u16 * a / 255) as u8 + color.blue;
         self.alpha = (self.alpha as u16 + color.alpha as u16
             - (self.alpha as u16 * color.alpha as u16) / 255) as u8;
-    }
-
-    fn blend_sampled_slice(
-        pixels: &mut [Self],
-        mut sample: impl FnMut() -> PremultipliedRgbaColor,
-    ) {
-        // Gather strided samples before blending so SIMD sees contiguous inputs.
-        for pixels in pixels.chunks_mut(32) {
-            let mut colors = [PremultipliedRgbaColor::default(); 32];
-            let colors = &mut colors[..pixels.len()];
-            for color in colors.iter_mut() {
-                *color = sample();
-            }
-            if colors.iter().fold(255, |alpha, color| alpha & color.alpha) == 255 {
-                pixels.copy_from_slice(colors);
-                continue;
-            }
-            for (pixel, color) in pixels.iter_mut().zip(colors) {
-                let a = (u8::MAX - color.alpha) as u16;
-                // Byte products are at most 65025. This is exact floor division
-                // by 255 in that range, using operations available in SIMD.
-                let div255 = |v: u16| (v + 1 + (v >> 8)) >> 8;
-                pixel.red = div255(pixel.red as u16 * a) as u8 + color.red;
-                pixel.green = div255(pixel.green as u16 * a) as u8 + color.green;
-                pixel.blue = div255(pixel.blue as u16 * a) as u8 + color.blue;
-                pixel.alpha = (pixel.alpha as u16 + color.alpha as u16
-                    - div255(pixel.alpha as u16 * color.alpha as u16))
-                    as u8;
-            }
-        }
     }
 
     fn from_rgb(r: u8, g: u8, b: u8) -> Self {
