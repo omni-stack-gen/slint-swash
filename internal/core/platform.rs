@@ -24,27 +24,10 @@ use std::time;
 #[cfg(target_arch = "wasm32")]
 use web_time as time;
 
-#[cfg(feature = "svg")]
-pub use crate::graphics::image::{SvgError, SvgImage, SvgOptions};
-
 /// This trait defines the interface between Slint and platform APIs typically provided by operating and windowing systems.
 pub trait Platform {
     /// Instantiate a window for a component.
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError>;
-
-    /// Decodes SVG bytes using the platform's image implementation.
-    /// The options resolve text through Slint's registered fonts.
-    /// Return `None` to use Slint's decoder; `Some(Err(_))` rejects invalid data.
-    /// Slint calls this for SVG/SVGZ files, embedded resources, and image data
-    /// loaded after this platform is installed, without an application callback.
-    #[cfg(all(feature = "svg", not(target_arch = "wasm32")))]
-    fn load_svg_image(
-        &self,
-        _data: &[u8],
-        _options: &SvgOptions<'_>,
-    ) -> Option<Result<Box<dyn SvgImage>, SvgError>> {
-        None
-    }
 
     /// Spins an event loop and renders the visible windows.
     fn run_event_loop(&self) -> Result<(), PlatformError> {
