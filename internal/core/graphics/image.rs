@@ -1949,6 +1949,40 @@ mod tests {
         SharedPixelBuffer::<crate::graphics::Rgb8Pixel>::clone_from_slice(&rgba, 8, 8);
     }
 
+    #[cfg(feature = "external-pixel-buffer")]
+    #[test]
+    fn external_pixels_are_retained_and_cloned_without_copying() {
+        let owner = alloc::sync::Arc::new(vec![
+            Rgba8Pixel::new(1, 2, 3, 4),
+            Rgba8Pixel::new(5, 6, 7, 8),
+        ]);
+        let pointer = owner.as_ptr();
+        let buffer = unsafe {
+            SharedPixelBuffer::from_external(pointer, 2, 1, owner.clone())
+        };
+        let clone = buffer.clone();
+
+        assert_eq!(buffer.as_slice(), owner.as_slice());
+        assert_eq!(clone.as_slice().as_ptr(), pointer);
+        assert_eq!(alloc::sync::Arc::strong_count(&owner), 3);
+    }
+
+    #[cfg(feature = "external-pixel-buffer")]
+    #[test]
+    fn mutating_external_pixels_first_creates_an_owned_copy() {
+        let owner = alloc::sync::Arc::new(vec![Rgba8Pixel::new(1, 2, 3, 4)]);
+        let pointer = owner.as_ptr();
+        let mut buffer = unsafe {
+            SharedPixelBuffer::from_external(pointer, 1, 1, owner.clone())
+        };
+
+        buffer.make_mut_slice()[0] = Rgba8Pixel::new(9, 8, 7, 6);
+
+        assert_eq!(owner[0], Rgba8Pixel::new(1, 2, 3, 4));
+        assert_eq!(buffer.as_slice(), &[Rgba8Pixel::new(9, 8, 7, 6)]);
+        assert_ne!(buffer.as_slice().as_ptr(), pointer);
+    }
+
     #[test]
     fn test_premultiplied_to_rgb_zero_alpha() {
         let pixel = Rgba8Pixel::new(5, 10, 15, 0);
