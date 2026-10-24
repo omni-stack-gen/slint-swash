@@ -1426,11 +1426,17 @@ impl<const NEEDS_SET_DIRTY: bool, DirtyHandler: PropertyDirtyHandler>
     }
 }
 
+impl<const NEEDS_SET_DIRTY: bool, DirtyHandler> PropertyTracker<NEEDS_SET_DIRTY, DirtyHandler> {
+    pub(crate) fn mark_dependents_dirty(&self) {
+        unsafe { mark_dependencies_dirty(self.holder.dependencies.as_ptr() as *mut _) };
+    }
+}
+
 impl<DirtyHandler> PropertyTracker<true, DirtyHandler> {
     /// Mark this PropertyTracker as dirty
     pub fn set_dirty(&self) {
         self.holder.dirty.set(true);
-        unsafe { mark_dependencies_dirty(self.holder.dependencies.as_ptr() as *mut _) };
+        self.mark_dependents_dirty();
     }
 }
 

@@ -373,6 +373,7 @@ fn default_config() -> cbindgen::Config {
         ..Default::default()
     };
     config.defines = [
+        ("feature = external-pixel-buffer".into(), "SLINT_DISABLED_CODE".into()),
         ("target_pointer_width = 64".into(), "SLINT_TARGET_64".into()),
         ("target_pointer_width = 32".into(), "SLINT_TARGET_32".into()),
         // Disable any wasm guarded code in C++, too - so that there are no gaps in enums.

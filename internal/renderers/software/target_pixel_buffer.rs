@@ -88,7 +88,40 @@ pub struct DrawTextureArgs {
     pub tiling: Option<TilingInfo>,
 }
 
+/// A retained identity for an immutable source image view.
+///
+/// Comparing keys does not compare pixel contents.
+/// Keeping a key alive retains its image storage,
+/// so modifying a shared pixel buffer detaches the modified pixels through copy-on-write.
+#[cfg(feature = "experimental")]
+#[derive(Clone, PartialEq)]
+pub struct TextureCacheKey {
+    image: SharedImageBuffer,
+    image_size: IntSize,
+    source_rect: PhysicalRect,
+}
+
 impl DrawTextureArgs {
+    /// Returns a retained cache key for this source view, when its storage supports one.
+    ///
+    /// Equal keys guarantee equal source pixels and pixel format.
+    /// Different keys may contain equal pixels.
+    /// Drawing attributes such as opacity and destination position are not part of the key.
+    #[cfg(feature = "experimental")]
+    pub fn source_cache_key(&self) -> Option<TextureCacheKey> {
+        match &self.data {
+            TextureDataContainer::Shared {
+                buffer: SharedBufferData::SharedImage(image),
+                source_rect,
+            } => Some(TextureCacheKey {
+                image: image.clone(),
+                image_size: image.size(),
+                source_rect: *source_rect,
+            }),
+            _ => None,
+        }
+    }
+
     /// Returns the source image data for this texture
     pub fn source(&self) -> TextureData<'_> {
         match &self.data {
@@ -228,5 +261,82 @@ pub trait TargetPixelBuffer {
     /// implemented and instead the software renderer needs to draw the texture
     fn draw_texture(&mut self, _: &DrawTextureArgs, _clip: &PhysicalRegion) -> bool {
         false
+    }
+}
+
+#[cfg(all(test, feature = "experimental"))]
+mod texture_cache_key_tests {
+    use super::*;
+
+    fn texture(image: SharedImageBuffer, source_rect: PhysicalRect) -> DrawTextureArgs {
+        DrawTextureArgs {
+            data: TextureDataContainer::Shared {
+                buffer: SharedBufferData::SharedImage(image),
+                source_rect,
+            },
+            colorize: None,
+            alpha: 255,
+            dst_x: 0,
+            dst_y: 0,
+            dst_width: source_rect.size.width as usize,
+            dst_height: source_rect.size.height as usize,
+            rotation: RenderingRotation::NoRotation,
+            tiling: None,
+        }
+    }
+
+    #[test]
+    fn texture_cache_key_retains_pixels_across_copy_on_write() {
+        let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(2, 1);
+        pixels.make_mut_bytes().fill(255);
+        let rect = euclid::rect(0, 0, 2, 1);
+        let key =
+            texture(SharedImageBuffer::RGBA8(pixels.clone()), rect).source_cache_key().unwrap();
+        let same =
+            texture(SharedImageBuffer::RGBA8(pixels.clone()), rect).source_cache_key().unwrap();
+        assert!(key == same);
+        pixels.make_mut_bytes()[0] = 17;
+        let changed = texture(SharedImageBuffer::RGBA8(pixels), rect).source_cache_key().unwrap();
+        assert!(key != changed);
+        assert!(key == same);
+    }
+
+    #[test]
+    fn texture_cache_key_distinguishes_views_formats_and_allocations() {
+        let pixels = SharedPixelBuffer::<Rgba8Pixel>::new(2, 1);
+        let first = texture(SharedImageBuffer::RGBA8(pixels.clone()), euclid::rect(0, 0, 1, 1))
+            .source_cache_key()
+            .unwrap();
+        let second = texture(SharedImageBuffer::RGBA8(pixels.clone()), euclid::rect(1, 0, 1, 1))
+            .source_cache_key()
+            .unwrap();
+        let other_format =
+            texture(SharedImageBuffer::RGBA8Premultiplied(pixels), euclid::rect(0, 0, 1, 1))
+                .source_cache_key()
+                .unwrap();
+        let other_allocation = texture(
+            SharedImageBuffer::RGBA8(SharedPixelBuffer::<Rgba8Pixel>::new(2, 1)),
+            euclid::rect(0, 0, 1, 1),
+        )
+        .source_cache_key()
+        .unwrap();
+        assert!(first != second);
+        assert!(first != other_format);
+        assert!(first != other_allocation);
+    }
+
+    #[test]
+    fn texture_cache_key_is_optional_for_static_data() {
+        let mut args = texture(
+            SharedImageBuffer::RGBA8(SharedPixelBuffer::<Rgba8Pixel>::new(1, 1)),
+            euclid::rect(0, 0, 1, 1),
+        );
+        args.data = TextureDataContainer::Static(TextureData::new(
+            &[0; 4],
+            TexturePixelFormat::Rgba,
+            4,
+            IntSize::new(1, 1),
+        ));
+        assert!(args.source_cache_key().is_none());
     }
 }

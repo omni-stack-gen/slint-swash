@@ -408,7 +408,7 @@ mod target_pixel_buffer;
 
 #[cfg(feature = "experimental")]
 pub use target_pixel_buffer::{
-    DrawRectangleArgs, DrawTextureArgs, TargetPixelBuffer, TexturePixelFormat,
+    DrawRectangleArgs, DrawTextureArgs, TargetPixelBuffer, TextureCacheKey, TexturePixelFormat,
 };
 
 #[cfg(not(feature = "experimental"))]
@@ -1255,9 +1255,12 @@ impl RendererSealed for SoftwareRenderer {
         let mut premul = SharedPixelBuffer::<PremultipliedRgbaColor>::new(size.width, size.height);
 
         let old_repaint_buffer_type = self.repaint_buffer_type();
+        // Snapshots use window coordinates, independent of panel rotation.
+        let old_rotation = self.rotation.replace(RenderingRotation::NoRotation);
         // ensure that caches are clear
         self.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
         self.render(premul.make_mut_slice(), size.width as usize);
+        self.rotation.set(old_rotation);
         self.set_repaint_buffer_type(old_repaint_buffer_type);
 
         let mut target_buffer_with_alpha =
@@ -2394,8 +2397,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
 
             ImageInner::NineSlice(..) => unreachable!(),
             _ => {
-                let target_rect =
-                    euclid::Rect::new(offset, fit_size).round().cast().transformed(self.rotation);
+                let unrotated_target = euclid::Rect::new(offset, fit_size).round().cast();
+                let target_rect = unrotated_target.transformed(self.rotation);
                 let Some(clipped_target) = physical_clip.intersection(&target_rect) else {
                     return;
                 };
@@ -2406,7 +2409,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         .round()
                         .cast()
                 } else {
-                    target_rect.size.cast()
+                    unrotated_target.size.cast()
                 };
                 if let Some(buffer) = image_inner.render_to_buffer(Some(svg_target_size)) {
                     let buf_size = buffer.size().cast::<f32>();

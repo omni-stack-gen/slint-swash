@@ -60,6 +60,7 @@ OpaqueImageVTable_static! {
 ///
 /// See the documentation for [`Image`] for examples how to use this type to integrate
 /// Slint with external rendering functions.
+#[cfg(not(feature = "external-pixel-buffer"))]
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct SharedPixelBuffer<Pixel> {
@@ -68,7 +69,74 @@ pub struct SharedPixelBuffer<Pixel> {
     pub(crate) data: SharedVector<Pixel>,
 }
 
+/// Reference-counted CPU pixels with optional immutable external storage.
+/// Cloning retains the storage; mutable access first makes an owned copy.
+///
+/// cbindgen:ignore
+#[cfg(feature = "external-pixel-buffer")]
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct SharedPixelBuffer<Pixel> {
+    width: u32,
+    height: u32,
+    pub(crate) data: SharedVector<Pixel>,
+    external: Option<alloc::sync::Arc<ExternalPixels<Pixel>>>,
+}
+
+#[cfg(feature = "external-pixel-buffer")]
+struct ExternalPixels<Pixel> {
+    pointer: *const Pixel,
+    length: usize,
+    _owner: alloc::sync::Arc<dyn Send + Sync>,
+}
+
+#[cfg(feature = "external-pixel-buffer")]
+impl<Pixel> core::fmt::Debug for ExternalPixels<Pixel> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExternalPixels").field("length", &self.length).finish_non_exhaustive()
+    }
+}
+
+// SAFETY: from_external() requires immutable storage valid until the owner drops.
+#[cfg(feature = "external-pixel-buffer")]
+unsafe impl<Pixel: Send + Sync> Send for ExternalPixels<Pixel> {}
+#[cfg(feature = "external-pixel-buffer")]
+unsafe impl<Pixel: Send + Sync> Sync for ExternalPixels<Pixel> {}
+
 impl<Pixel> SharedPixelBuffer<Pixel> {
+    /// Creates a buffer that retains externally allocated, immutable pixels without copying.
+    /// Mutating this buffer creates a heap copy and leaves the external pixels unchanged.
+    ///
+    /// # Safety
+    /// `pointer` must be aligned, non-null, and valid for `width * height` initialized pixels.
+    /// The pixels must remain immutable and readable on every thread until `owner` is dropped.
+    /// Their total byte length must not exceed `isize::MAX`.
+    #[cfg(feature = "external-pixel-buffer")]
+    pub unsafe fn from_external(
+        pointer: *const Pixel,
+        width: u32,
+        height: u32,
+        owner: alloc::sync::Arc<dyn Send + Sync>,
+    ) -> Self {
+        let length = (width as usize).checked_mul(height as usize).expect("image size overflow");
+        assert!(
+            length
+                .checked_mul(core::mem::size_of::<Pixel>())
+                .is_some_and(|n| n <= isize::MAX as usize)
+        );
+        assert!(!pointer.is_null());
+        Self {
+            width,
+            height,
+            data: SharedVector::default(),
+            external: Some(alloc::sync::Arc::new(ExternalPixels {
+                pointer,
+                length,
+                _owner: owner,
+            })),
+        }
+    }
+
     /// Returns the width of the image in pixels.
     pub fn width(&self) -> u32 {
         self.width
@@ -88,6 +156,13 @@ impl<Pixel> SharedPixelBuffer<Pixel> {
 impl<Pixel: Clone> SharedPixelBuffer<Pixel> {
     /// Return a mutable slice to the pixel data. If the SharedPixelBuffer was shared, this will make a copy of the buffer.
     pub fn make_mut_slice(&mut self) -> &mut [Pixel] {
+        #[cfg(feature = "external-pixel-buffer")]
+        if let Some(external) = self.external.as_ref() {
+            // SAFETY: from_external() establishes the storage lifetime and length.
+            self.data =
+                unsafe { core::slice::from_raw_parts(external.pointer, external.length) }.into();
+            self.external = None;
+        }
         self.data.make_mut_slice()
     }
 }
@@ -99,19 +174,24 @@ where
     /// Returns the pixels interpreted as raw bytes.
     pub fn as_bytes(&self) -> &[u8] {
         use rgb::ComponentBytes;
-        self.data.as_slice().as_bytes()
+        self.as_slice().as_bytes()
     }
 
     /// Returns the pixels interpreted as raw bytes.
     pub fn make_mut_bytes(&mut self) -> &mut [u8] {
         use rgb::ComponentBytes;
-        self.data.make_mut_slice().as_bytes_mut()
+        self.make_mut_slice().as_bytes_mut()
     }
 }
 
 impl<Pixel> SharedPixelBuffer<Pixel> {
     /// Return a slice to the pixel data.
     pub fn as_slice(&self) -> &[Pixel] {
+        #[cfg(feature = "external-pixel-buffer")]
+        if let Some(external) = &self.external {
+            // SAFETY: from_external() establishes the storage lifetime and length.
+            return unsafe { core::slice::from_raw_parts(external.pointer, external.length) };
+        }
         self.data.as_slice()
     }
 }
@@ -123,6 +203,8 @@ impl<Pixel: Clone + Default> SharedPixelBuffer<Pixel> {
         Self {
             width,
             height,
+            #[cfg(feature = "external-pixel-buffer")]
+            external: None,
             data: core::iter::repeat_n(Pixel::default(), width as usize * height as usize)
                 .collect(),
         }
@@ -153,7 +235,13 @@ impl<Pixel: Clone> SharedPixelBuffer<Pixel> {
             width as u64 * height as u64,
             "SharedPixelBuffer::clone_from_slice: the slice does not cover the requested {width}x{height} pixels",
         );
-        Self { width, height, data }
+        Self {
+            width,
+            height,
+            data,
+            #[cfg(feature = "external-pixel-buffer")]
+            external: None,
+        }
     }
 }
 
@@ -221,15 +309,18 @@ impl SharedImageBuffer {
 
 impl PartialEq for SharedImageBuffer {
     fn eq(&self, other: &Self) -> bool {
+        if self.size() != other.size() {
+            return false;
+        }
         match self {
             Self::RGB8(lhs_buffer) => {
-                matches!(other, Self::RGB8(rhs_buffer) if lhs_buffer.data.as_ptr().eq(&rhs_buffer.data.as_ptr()))
+                matches!(other, Self::RGB8(rhs_buffer) if lhs_buffer.as_slice().as_ptr().eq(&rhs_buffer.as_slice().as_ptr()))
             }
             Self::RGBA8(lhs_buffer) => {
-                matches!(other, Self::RGBA8(rhs_buffer) if lhs_buffer.data.as_ptr().eq(&rhs_buffer.data.as_ptr()))
+                matches!(other, Self::RGBA8(rhs_buffer) if lhs_buffer.as_slice().as_ptr().eq(&rhs_buffer.as_slice().as_ptr()))
             }
             Self::RGBA8Premultiplied(lhs_buffer) => {
-                matches!(other, Self::RGBA8Premultiplied(rhs_buffer) if lhs_buffer.data.as_ptr().eq(&rhs_buffer.data.as_ptr()))
+                matches!(other, Self::RGBA8Premultiplied(rhs_buffer) if lhs_buffer.as_slice().as_ptr().eq(&rhs_buffer.as_slice().as_ptr()))
             }
         }
     }
@@ -463,7 +554,8 @@ impl ImageInner {
         match self {
             ImageInner::EmbeddedImage { buffer, .. } => Some(buffer.clone()),
             #[cfg(feature = "svg")]
-            ImageInner::Svg(svg) => match svg.render(_target_size_for_scalable_source) {
+            ImageInner::Svg(svg) => match svg::render_cached(svg, _target_size_for_scalable_source)
+            {
                 Ok(b) => Some(b),
                 // Ignore error when rendering a 0x0 image, that's just an empty image
                 Err(resvg::usvg::Error::InvalidSize) => None,
@@ -655,6 +747,8 @@ fn dynamic_image_to_shared_image_buffer(dynamic_image: image::DynamicImage) -> S
         SharedImageBuffer::RGBA8Premultiplied(SharedPixelBuffer {
             width: rgba8image.width(),
             height: rgba8image.height(),
+            #[cfg(feature = "external-pixel-buffer")]
+            external: None,
             data: rgba8image
                 .as_pixels()
                 .iter()
@@ -674,6 +768,7 @@ fn dynamic_image_to_shared_image_buffer(dynamic_image: image::DynamicImage) -> S
 impl PartialEq for ImageInner {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::None, Self::None) => true,
             (
                 Self::EmbeddedImage { cache_key: l_cache_key, buffer: l_buffer },
                 Self::EmbeddedImage { cache_key: r_cache_key, buffer: r_buffer },
@@ -891,13 +986,22 @@ impl Image {
             SharedImageBuffer::RGB8(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                data: buffer.data.into_iter().map(Into::into).collect(),
+                #[cfg(feature = "external-pixel-buffer")]
+                external: None,
+                data: buffer.as_slice().iter().copied().map(Into::into).collect(),
             },
             SharedImageBuffer::RGBA8(buffer) => buffer,
             SharedImageBuffer::RGBA8Premultiplied(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                data: buffer.data.into_iter().map(Image::premultiplied_rgba_to_rgba).collect(),
+                #[cfg(feature = "external-pixel-buffer")]
+                external: None,
+                data: buffer
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .map(Image::premultiplied_rgba_to_rgba)
+                    .collect(),
             },
         })
     }
@@ -910,12 +1014,21 @@ impl Image {
             SharedImageBuffer::RGB8(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                data: buffer.data.into_iter().map(Into::into).collect(),
+                #[cfg(feature = "external-pixel-buffer")]
+                external: None,
+                data: buffer.as_slice().iter().copied().map(Into::into).collect(),
             },
             SharedImageBuffer::RGBA8(buffer) => SharedPixelBuffer::<Rgba8Pixel> {
                 width: buffer.width,
                 height: buffer.height,
-                data: buffer.data.into_iter().map(Image::rgba_to_premultiplied_rgba).collect(),
+                #[cfg(feature = "external-pixel-buffer")]
+                external: None,
+                data: buffer
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .map(Image::rgba_to_premultiplied_rgba)
+                    .collect(),
             },
             SharedImageBuffer::RGBA8Premultiplied(buffer) => buffer,
         })
@@ -1835,6 +1948,40 @@ mod tests {
         // Four bytes per pixel read as three, the same mistake the other way around.
         let rgba = [0u8; 8 * 8 * 4];
         SharedPixelBuffer::<crate::graphics::Rgb8Pixel>::clone_from_slice(&rgba, 8, 8);
+    }
+
+    #[cfg(feature = "external-pixel-buffer")]
+    #[test]
+    fn external_pixels_are_retained_and_cloned_without_copying() {
+        let owner = alloc::sync::Arc::new(vec![
+            Rgba8Pixel::new(1, 2, 3, 4),
+            Rgba8Pixel::new(5, 6, 7, 8),
+        ]);
+        let pointer = owner.as_ptr();
+        let buffer = unsafe {
+            SharedPixelBuffer::from_external(pointer, 2, 1, owner.clone())
+        };
+        let clone = buffer.clone();
+
+        assert_eq!(buffer.as_slice(), owner.as_slice());
+        assert_eq!(clone.as_slice().as_ptr(), pointer);
+        assert_eq!(alloc::sync::Arc::strong_count(&owner), 3);
+    }
+
+    #[cfg(feature = "external-pixel-buffer")]
+    #[test]
+    fn mutating_external_pixels_first_creates_an_owned_copy() {
+        let owner = alloc::sync::Arc::new(vec![Rgba8Pixel::new(1, 2, 3, 4)]);
+        let pointer = owner.as_ptr();
+        let mut buffer = unsafe {
+            SharedPixelBuffer::from_external(pointer, 1, 1, owner.clone())
+        };
+
+        buffer.make_mut_slice()[0] = Rgba8Pixel::new(9, 8, 7, 6);
+
+        assert_eq!(owner[0], Rgba8Pixel::new(1, 2, 3, 4));
+        assert_eq!(buffer.as_slice(), &[Rgba8Pixel::new(9, 8, 7, 6)]);
+        assert_ne!(buffer.as_slice().as_ptr(), pointer);
     }
 
     #[test]

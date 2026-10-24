@@ -19,6 +19,8 @@ categories = ["gui", "rendering::engine", "no-std"]
 path = "lib.rs"
 
 [features]
+## Rust-only immutable external pixel storage with explicit ownership.
+external-pixel-buffer = ["std", "i-slint-core/external-pixel-buffer"]
 
 default = [
   "std",
