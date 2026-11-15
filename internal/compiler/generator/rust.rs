@@ -4137,6 +4137,17 @@ fn compile_array_index_assignment(expr: &Expression, ctx: &EvaluationContext) ->
 
 #[inline(never)]
 fn compile_binary_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
+    if let Expression::BinaryExpression { lhs, rhs, op: op @ ('=' | '!') } = expr {
+        if lhs.ty(ctx) == Type::String {
+            if let Expression::StringLiteral(literal) = rhs.as_ref() {
+                let lhs = compile_string_comparison_operand(lhs, ctx);
+                let literal = literal.as_str();
+                let op = if *op == '=' { quote!(==) } else { quote!(!=) };
+                return quote!((((#lhs) #op #literal)));
+            }
+        }
+    }
+
     // Long chains of binary operators, such as `a && b && c && ...`, nest on the
     // left side. Iterate that spine instead of recursing into it, so that the
     // stack depth stays bounded no matter how long the chain is.
@@ -4153,6 +4164,16 @@ fn compile_binary_expression(expr: &Expression, ctx: &EvaluationContext) -> Toke
         result_ty = llr::binary_expression_ty(op, || result_ty);
     }
     result
+}
+
+fn compile_string_comparison_operand(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
+    if let Expression::FunctionParameterReference { index } = expr {
+        let index = proc_macro2::Literal::usize_unsuffixed(*index);
+        quote!(args.#index.as_str())
+    } else {
+        let expression = compile_expression_to_value_no_parenthesis(expr, ctx);
+        quote!((#expression).as_str())
+    }
 }
 
 fn compile_binary_operator(
