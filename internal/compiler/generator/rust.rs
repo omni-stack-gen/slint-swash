@@ -4183,6 +4183,13 @@ fn compile_binary_operator(
     op: char,
     ctx: &EvaluationContext,
 ) -> TokenStream {
+    if *lhs_ty == Type::String && matches!(op, '=' | '!') {
+        if let Expression::StringLiteral(literal) = rhs {
+            let literal = literal.as_str();
+            let op = if op == '=' { quote!(==) } else { quote!(!=) };
+            return quote!((((#lhs).as_str()) #op #literal));
+        }
+    }
     let rhs = compile_expression_to_value_no_parenthesis(rhs, ctx);
 
     if lhs_ty.as_unit_product().is_some() && (op == '=' || op == '!') {

@@ -24,7 +24,7 @@ fn string_function_parameter_comparison_borrows_the_parameter() {
         r#"
         export global Strings {
             public pure function equals(value: string) -> bool {
-                return !(value != "expected");
+                return !(value != "first" && value != "second");
             }
         }
         export component Test inherits Rectangle {}
@@ -32,6 +32,8 @@ fn string_function_parameter_comparison_borrows_the_parameter() {
     );
 
     assert!(generated.contains("args . 0 . as_str ()"));
-    assert!(generated.contains("!= \"expected\""));
-    assert!(!generated.contains("SharedString :: from (\"expected\")"));
+    assert!(generated.contains("!= \"first\""));
+    assert!(generated.contains("!= \"second\""));
+    assert!(!generated.contains("SharedString :: from (\"first\")"));
+    assert!(!generated.contains("SharedString :: from (\"second\")"));
 }
